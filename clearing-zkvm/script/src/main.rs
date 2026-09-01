@@ -7,15 +7,19 @@
 //!                                       # proof (the heavy gnark wrap; times it)
 //!
 //! `--execute` runs the `ExecutingProver` *inside* the zkVM and returns the
-//! committed public outputs (prev_root, new_root, messages, operator_key,
-//! batch_height); we check they match. The batch includes an **authenticated
-//! trade** (maker + taker + matcher signatures), so the guest re-verifies three
-//! ed25519 signatures — accelerated by SP1's curve25519 precompile. `--prove`
-//! produces a real SP1 proof of that execution.
+//! committed 144-byte public-values slice (`prev_root ‖ new_root ‖
+//! withdrawals_root ‖ matcher_key ‖ batch_seq_le ‖ expiry_height_le`); we check
+//! it matches. The batch includes an **authenticated trade** (maker + taker +
+//! matcher signatures), so the guest re-verifies three ed25519 signatures —
+//! accelerated by SP1's curve25519 precompile. `--prove` produces a real SP1
+//! proof of that execution.
 
 use clearing::auth::{Ed25519PubKey, Ed25519Signature, Order, Side, SignedOrder, TradeAuth};
-use clearing::commitment::{encode_matcher_msg, encode_order, order_id};
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::commitment::{
+    encode_matcher_msg, encode_order, order_id, pack_public_values, withdrawals_root,
+    PUBLIC_VALUES_LEN,
+};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{ExecutingProver, OnChainMessage, Prover, State, StateTree, Tx, Witness};
@@ -26,9 +30,8 @@ use clearing::commitment::hash_plain::Sha256Hasher as H;
 use clearing::commitment::hash_poseidon2::Poseidon2Hasher as H;
 use ed25519_dalek::{Signer, SigningKey};
 use sp1_sdk::{
-    Elf, ProvingKey as _, SP1Stdin,
     blocking::{ProveRequest as _, Prover as _, ProverClient},
-    include_elf,
+    include_elf, Elf, ProvingKey as _, SP1Stdin,
 };
 use uuid::Uuid;
 
@@ -43,12 +46,56 @@ fn sign(sk: &SigningKey, msg: &[u8]) -> Ed25519Signature {
     Ed25519Signature::from_bytes(sk.sign(msg).to_bytes())
 }
 
+fn expected_public_values(
+    witness: &Witness,
+    matcher_key: &Ed25519PubKey,
+    batch_seq: u64,
+    expiry_height: u64,
+) -> [u8; PUBLIC_VALUES_LEN] {
+    let entries: Vec<_> = witness
+        .messages
+        .iter()
+        .map(
+            |OnChainMessage::Withdraw {
+                 owner,
+                 asset,
+                 amount,
+             }| (*owner, *asset, *amount),
+        )
+        .collect();
+    let w_root = withdrawals_root(&H::default(), batch_seq, &entries);
+    pack_public_values(
+        &witness.prev_root,
+        &witness.new_root,
+        &w_root,
+        matcher_key,
+        batch_seq,
+        expiry_height,
+    )
+}
+
+fn write_stdin(
+    witness: &Witness,
+    matcher_key: &Ed25519PubKey,
+    batch_seq: u64,
+    expiry_height: u64,
+) -> SP1Stdin {
+    let mut stdin = SP1Stdin::new();
+    stdin.write(witness);
+    stdin.write(matcher_key);
+    // Guest reads expiry_height then batch_seq; params follow the byte layout.
+    stdin.write(&expiry_height);
+    stdin.write(&batch_seq);
+    stdin
+}
+
 /// Build an authenticated batch (fund + register keys, `n_trades` signed trades,
 /// then a withdrawal) and capture its witness. Returns the witness plus the
-/// trusted verifier config (operator key + batch height) the guest re-verifies.
-/// Each trade is a distinct order pair (unique salt) filled once, so the batch
-/// re-verifies `3 * n_trades` ed25519 signatures.
-fn build_witness(n_trades: u64) -> (Witness, Option<Ed25519PubKey>, u64) {
+/// trusted verifier config the guest re-verifies: matcher key, expiry height
+/// (v1: 0), and batch_seq (0 for this single-batch demo). Each trade is a
+/// distinct order pair (unique salt) filled once, so the batch re-verifies
+/// `3 * n_trades` ed25519 signatures.
+fn build_witness(n_trades: u64) -> (Witness, Ed25519PubKey, u64, u64) {
     let market = MarketId(Uuid::from_u128(0xA1));
     let usdc = AssetId(0);
     let btc = AssetId(1);
@@ -58,7 +105,9 @@ fn build_witness(n_trades: u64) -> (Witness, Option<Ed25519PubKey>, u64) {
     let (buyer_sk, buyer_pk) = keypair(1);
     let (seller_sk, seller_pk) = keypair(2);
     let (op_sk, op_pk) = keypair(3);
-    let batch_height = 0u64;
+    let expiry_height = 0u64;
+    // First batch in an empty contract: `withdrawal_roots.len() == 0`.
+    let batch_seq = 0u64;
 
     let mut state = State::new();
     state.register_market(
@@ -82,6 +131,7 @@ fn build_witness(n_trades: u64) -> (Witness, Option<Ed25519PubKey>, u64) {
             asset: usdc,
             amount: Amount(400 * n_trades as i128 + 1000),
             nonce: 0,
+            owner: L1Address(buyer_pk.0),
             trading_key: Some(buyer_pk),
         },
         Tx::Deposit {
@@ -89,34 +139,64 @@ fn build_witness(n_trades: u64) -> (Witness, Option<Ed25519PubKey>, u64) {
             asset: btc,
             amount: Amount(2 * n_trades as i128 + 10),
             nonce: 1,
+            owner: L1Address(seller_pk.0),
             trading_key: Some(seller_pk),
         },
     ];
 
     // One distinct, single-fill signed trade per iteration (unique salt).
     for i in 0..n_trades {
-        let fill = Fill { buyer, seller, base_amount: Amount(2), quote_amount: Amount(400) };
+        let fill = Fill {
+            buyer,
+            seller,
+            base_amount: Amount(2),
+            quote_amount: Amount(400),
+        };
         let buy = Order {
-            account: buyer, market, side: Side::Buy,
-            base_amount: Amount(2), limit_price: Amount(250), expiry: 1000, salt: i,
+            account: buyer,
+            market,
+            side: Side::Buy,
+            base_amount: Amount(2),
+            limit_price: Amount(250),
+            expiry: 1000,
+            salt: i,
         };
         let sell = Order {
-            account: seller, market, side: Side::Sell,
-            base_amount: Amount(2), limit_price: Amount(180), expiry: 1000, salt: i,
+            account: seller,
+            market,
+            side: Side::Sell,
+            base_amount: Amount(2),
+            limit_price: Amount(180),
+            expiry: 1000,
+            salt: i,
         };
         let matcher_msg = encode_matcher_msg(market, &order_id(&buy), &order_id(&sell), &fill);
         let auth = TradeAuth {
-            buy: SignedOrder { order: buy, sig: sign(&buyer_sk, &encode_order(&buy)) },
-            sell: SignedOrder { order: sell, sig: sign(&seller_sk, &encode_order(&sell)) },
+            buy: SignedOrder {
+                order: buy,
+                sig: sign(&buyer_sk, &encode_order(&buy)),
+            },
+            sell: SignedOrder {
+                order: sell,
+                sig: sign(&seller_sk, &encode_order(&sell)),
+            },
             matcher_sig: sign(&op_sk, &matcher_msg),
         };
-        batch.push(Tx::Trade { market, fill, auth: Some(Box::new(auth)) });
+        batch.push(Tx::Trade {
+            market,
+            fill,
+            auth: Some(Box::new(auth)),
+        });
     }
 
-    batch.push(Tx::Withdraw { account: buyer, asset: usdc, amount: Amount(100) });
+    batch.push(Tx::Withdraw {
+        account: buyer,
+        asset: usdc,
+        amount: Amount(100),
+    });
 
     let witness = Witness::capture(&mut state, &mut tree, &batch);
-    (witness, Some(op_pk), batch_height)
+    (witness, op_pk, expiry_height, batch_seq)
 }
 
 fn main() {
@@ -131,27 +211,27 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
 
-    let (witness, operator_key, batch_height) = build_witness(n_trades);
+    let (witness, matcher_key, expiry_height, batch_seq) = build_witness(n_trades);
     // The trades must have applied (authenticated swaps), so the batch is not a
     // no-op — a quick sanity check that auth passed at capture.
-    assert!(!witness.updates.is_empty(), "authenticated batch produced no updates");
+    assert!(
+        !witness.updates.is_empty(),
+        "authenticated batch produced no updates"
+    );
 
     // Native sanity check (same logic the guest runs, same trusted config).
-    let native = match operator_key {
-        Some(k) => ExecutingProver::with_auth(H::default(), k, batch_height),
-        None => ExecutingProver::new(H::default()),
-    };
-    native.prove(&witness).expect("witness should be valid");
+    ExecutingProver::with_auth(H::default(), matcher_key, expiry_height)
+        .prove(&witness)
+        .expect("witness should be valid");
+
+    let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
 
     let client = ProverClient::from_env();
 
     // Execute: run the guest in the zkVM, get the committed public outputs.
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&witness);
-    stdin.write(&operator_key);
-    stdin.write(&batch_height);
+    let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
     let t_exec = std::time::Instant::now();
-    let (mut public, report) = client.execute(ELF, stdin).run().expect("execute failed");
+    let (public, report) = client.execute(ELF, stdin).run().expect("execute failed");
     let exec_time = t_exec.elapsed();
     let cycles = report.total_instruction_count();
     println!(
@@ -160,19 +240,18 @@ fn main() {
         cycles as f64 / n_trades as f64,
     );
 
-    let prev_root: [u8; 32] = public.read();
-    let new_root: [u8; 32] = public.read();
-    let messages: Vec<OnChainMessage> = public.read();
-    let out_op_key: Option<Ed25519PubKey> = public.read();
-    let out_height: u64 = public.read();
-    assert_eq!(prev_root, witness.prev_root);
-    assert_eq!(new_root, witness.new_root);
-    assert_eq!(messages, witness.messages);
-    assert_eq!(out_op_key, operator_key);
-    assert_eq!(out_height, batch_height);
+    let pv = public.as_slice();
+    assert_eq!(
+        pv.len(),
+        PUBLIC_VALUES_LEN,
+        "public values must be 144 bytes"
+    );
+    assert_eq!(pv, expected.as_slice());
+    assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+    assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
     println!(
-        "public outputs match ✓  (prev_root, new_root, {} withdrawal message(s), operator_key, batch_height)",
-        messages.len()
+        "public outputs match ✓  (144-byte slice: prev/new/withdrawals roots, matcher_key, batch_seq, expiry_height; {} withdrawal(s))",
+        witness.messages.len()
     );
 
     if do_prove {
@@ -182,13 +261,10 @@ fn main() {
         let pk = client.setup(ELF).expect("setup failed");
         let setup_time = t_setup.elapsed();
 
-        let req = client.prove(&pk, {
-            let mut s = SP1Stdin::new();
-            s.write(&witness);
-            s.write(&operator_key);
-            s.write(&batch_height);
-            s
-        });
+        let req = client.prove(
+            &pk,
+            write_stdin(&witness, &matcher_key, batch_seq, expiry_height),
+        );
         // Core is fast; Groth16 is the on-chain artifact and the expensive one
         // (the gnark wrap). `.groth16()` is a consuming builder that returns the
         // request, so we chain it.
@@ -207,12 +283,136 @@ fn main() {
             .expect("verify failed");
         let verify_time = t_verify.elapsed();
 
-        println!("SP1 {mode} proof generated + verified ✓  ({} proof bytes)", proof.bytes().len());
+        println!(
+            "SP1 {mode} proof generated + verified ✓  ({} proof bytes)",
+            proof.bytes().len()
+        );
         println!("  timing:");
         println!("    execute : {exec_time:.2?}");
         println!("    setup   : {setup_time:.2?}");
         println!("    prove   : {prove_time:.2?}");
         println!("    verify  : {verify_time:.2?}");
-        println!("    total   : {:.2?}", exec_time + setup_time + prove_time + verify_time);
+        println!(
+            "    total   : {:.2?}",
+            exec_time + setup_time + prove_time + verify_time
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// SP1 Groth16 public-input digest: SHA-256 of the committed bytes, then
+    /// `out[0] &= 0x1F` so the result fits in BN254 Fr (253 bits). Copied from
+    /// the on-chain verifier (`hashPublicValues` / `hash_public_inputs`).
+    fn hash_public_inputs(public_values: &[u8]) -> [u8; 32] {
+        let mut out: [u8; 32] = Sha256::digest(public_values).into();
+        out[0] &= 0x1F;
+        out
+    }
+
+    #[test]
+    fn packed_public_values_are_144_bytes_and_seq_is_not_expiry() {
+        let prev = [0x11u8; 32];
+        let new = [0x22u8; 32];
+        let w = [0x33u8; 32];
+        let matcher = Ed25519PubKey([0x44u8; 32]);
+        let batch_seq = 7u64;
+        let expiry_height = 0u64;
+
+        let pv = pack_public_values(&prev, &new, &w, &matcher, batch_seq, expiry_height);
+        assert_eq!(pv.len(), 144);
+        assert_eq!(&pv[0..32], &prev);
+        assert_eq!(&pv[32..64], &new);
+        assert_eq!(&pv[64..96], &w);
+        assert_eq!(&pv[96..128], &matcher.0);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
+        // Distinct fields: a non-zero seq must not collide with expiry at 0.
+        assert_ne!(&pv[128..136], &pv[136..144]);
+    }
+
+    #[test]
+    fn hash_public_inputs_masks_bn254_top_bits() {
+        let pv = pack_public_values(
+            &[1u8; 32],
+            &[2u8; 32],
+            &[3u8; 32],
+            &Ed25519PubKey([4u8; 32]),
+            1,
+            0,
+        );
+        let digest = hash_public_inputs(&pv);
+        assert_eq!(
+            digest[0] & 0xE0,
+            0,
+            "top 3 bits must be cleared for BN254 Fr"
+        );
+
+        let unmasked: [u8; 32] = Sha256::digest(pv).into();
+        let mut expected = unmasked;
+        expected[0] &= 0x1F;
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn expected_public_values_from_demo_witness() {
+        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+        assert!(!witness.messages.is_empty());
+        let pv = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+        assert_eq!(&pv[0..32], &witness.prev_root);
+        assert_eq!(&pv[32..64], &witness.new_root);
+        assert_eq!(&pv[96..128], &matcher_key.0);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
+        assert_eq!(batch_seq, 0);
+        assert_eq!(expiry_height, 0);
+    }
+
+    #[test]
+    fn withdrawals_root_in_public_values_is_keyed_by_batch_seq_not_expiry() {
+        let (witness, matcher_key, _, _) = build_witness(1);
+        let batch_seq = 7u64;
+        let expiry_height = 99u64;
+        assert_ne!(batch_seq, expiry_height);
+
+        let entries: Vec<_> = witness
+            .messages
+            .iter()
+            .map(
+                |OnChainMessage::Withdraw {
+                     owner,
+                     asset,
+                     amount,
+                 }| (*owner, *asset, *amount),
+            )
+            .collect();
+        let seq_root = withdrawals_root(&H::default(), batch_seq, &entries);
+        let expiry_root = withdrawals_root(&H::default(), expiry_height, &entries);
+        assert_ne!(seq_root, expiry_root);
+
+        let pv = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+        assert_eq!(&pv[64..96], &seq_root);
+        assert_ne!(&pv[64..96], &expiry_root);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
+    }
+
+    #[test]
+    fn hash_public_inputs_matches_sp1_known_answer() {
+        // Vector from sp1-primitives `test_hash_public_values`.
+        let mut input = Vec::new();
+        for _ in 0..8 {
+            input.extend_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]);
+        }
+        let digest = hash_public_inputs(&input);
+        let expected = [
+            0x1c, 0xe9, 0x87, 0xd0, 0xa7, 0xfc, 0xc2, 0x63, 0x6f, 0xe8, 0x7e, 0x69, 0x29, 0x5b,
+            0xa1, 0x2b, 0x1c, 0xc4, 0x6c, 0x25, 0x6b, 0x36, 0x9a, 0xe7, 0x40, 0x1c, 0x51, 0xb8,
+            0x05, 0xee, 0x91, 0xbd,
+        ];
+        assert_eq!(digest, expected);
     }
 }

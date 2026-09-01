@@ -1,14 +1,15 @@
 //! The zkVM guest: proves one clearing batch transition.
 //!
-//! It reads a `Witness` plus the trusted verifier config (`operator_key`,
-//! `batch_height`), runs the *executing* verifier — re-execute the batch, bind
-//! execution + messages to the committed leaves, **and re-verify every trade's
-//! maker/taker/matcher signatures and over-fill accounting** (the keystone
-//! checks) — then commits the public outputs the on-chain verifier acts on:
-//! `prev_root`, `new_root`, the proven withdrawal `messages`, and the
-//! `operator_key`/`batch_height` it enforced (so the contract can check those
-//! against its own config/counter). If the witness is invalid, `prove` panics and
-//! no proof can be produced.
+//! It reads a `Witness` plus the trusted verifier config (`matcher_key`,
+//! `expiry_height`, `batch_seq`), runs the *executing* verifier — re-execute the
+//! batch, bind execution + messages to the committed leaves, **and re-verify
+//! every trade's maker/taker/matcher signatures and over-fill accounting** (the
+//! keystone checks) — then commits one 144-byte public-values slice:
+//! `prev_root ‖ new_root ‖ withdrawals_root ‖ matcher_key ‖ batch_seq_le ‖
+//! expiry_height_le`. `batch_seq` (the contract's withdrawal-root index) is
+//! distinct from `expiry_height` (the expiry clock; v1: 0). Production never
+//! passes `None` for the matcher key. If the witness is invalid, `prove` panics
+//! and no proof can be produced.
 //!
 //! This reuses `clearing::ExecutingProver` directly — the proven logic is exactly
 //! the native, tested verifier, so there is no second implementation to drift.
@@ -19,7 +20,8 @@
 sp1_zkvm::entrypoint!(main);
 
 use clearing::auth::Ed25519PubKey;
-use clearing::{ExecutingProver, Prover, Witness};
+use clearing::commitment::{pack_public_values, withdrawals_root};
+use clearing::{ExecutingProver, OnChainMessage, Prover, Witness};
 
 #[cfg(not(feature = "poseidon2"))]
 use clearing::commitment::hash_plain::Sha256Hasher as H;
@@ -28,21 +30,37 @@ use clearing::commitment::hash_poseidon2::Poseidon2Hasher as H;
 
 pub fn main() {
     let witness = sp1_zkvm::io::read::<Witness>();
-    // Trusted verifier config (not part of the witness): the operator key the
-    // matcher signatures must verify against, and the batch height for expiry.
-    let operator_key = sp1_zkvm::io::read::<Option<Ed25519PubKey>>();
-    let batch_height = sp1_zkvm::io::read::<u64>();
+    // Trusted matcher key — not optional. Production always re-verifies matcher
+    // signatures against this key.
+    let matcher_key = sp1_zkvm::io::read::<Ed25519PubKey>();
+    // Expiry clock (v1: 0). Distinct from `batch_seq` below.
+    let expiry_height = sp1_zkvm::io::read::<u64>();
+    // Index of this batch in the contract's `withdrawal_roots` (first batch = 0).
+    let batch_seq = sp1_zkvm::io::read::<u64>();
 
-    let prover = match operator_key {
-        Some(key) => ExecutingProver::with_auth(H::default(), key, batch_height),
-        None => ExecutingProver::new(H::default()),
-    };
-    prover.prove(&witness).expect("invalid batch transition");
+    ExecutingProver::with_auth(H::default(), matcher_key, expiry_height)
+        .prove(&witness)
+        .expect("invalid batch transition");
 
-    sp1_zkvm::io::commit(&witness.prev_root);
-    sp1_zkvm::io::commit(&witness.new_root);
-    sp1_zkvm::io::commit(&witness.messages);
-    // Commit the enforced config so the contract validates it against its own.
-    sp1_zkvm::io::commit(&operator_key);
-    sp1_zkvm::io::commit(&batch_height);
+    let entries: Vec<_> = witness
+        .messages
+        .iter()
+        .map(
+            |OnChainMessage::Withdraw {
+                 owner,
+                 asset,
+                 amount,
+             }| (*owner, *asset, *amount),
+        )
+        .collect();
+    let w_root = withdrawals_root(&H::default(), batch_seq, &entries);
+    let pv = pack_public_values(
+        &witness.prev_root,
+        &witness.new_root,
+        &w_root,
+        &matcher_key,
+        batch_seq,
+        expiry_height,
+    );
+    sp1_zkvm::io::commit_slice(&pv);
 }

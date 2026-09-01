@@ -27,6 +27,7 @@ pub mod hash_poseidon2;
 use std::collections::BTreeMap;
 
 use crate::account::Account;
+use crate::auth::Ed25519PubKey;
 use crate::id::{AccountId, Amount, AssetId, L1Address};
 use crate::state::{State, StateDelta};
 
@@ -245,6 +246,31 @@ pub fn withdrawals_root<H: Hasher>(
             .collect();
     }
     level[0]
+}
+
+/// Packed zkVM public-values width: one `commit_slice` of 144 bytes.
+pub const PUBLIC_VALUES_LEN: usize = 144;
+
+/// Pack the guest public values as one 144-byte slice (little-endian u64s).
+/// Parameter order matches the byte layout:
+///   0..32 prev_root | 32..64 new_root | 64..96 withdrawals_root
+///   96..128 matcher_key | 128..136 batch_seq | 136..144 expiry_height
+pub fn pack_public_values(
+    prev_root: &Hash,
+    new_root: &Hash,
+    w_root: &Hash,
+    matcher_key: &Ed25519PubKey,
+    batch_seq: u64,
+    expiry_height: u64,
+) -> [u8; PUBLIC_VALUES_LEN] {
+    let mut pv = [0u8; PUBLIC_VALUES_LEN];
+    pv[0..32].copy_from_slice(prev_root);
+    pv[32..64].copy_from_slice(new_root);
+    pv[64..96].copy_from_slice(w_root);
+    pv[96..128].copy_from_slice(&matcher_key.0);
+    pv[128..136].copy_from_slice(&batch_seq.to_le_bytes());
+    pv[136..144].copy_from_slice(&expiry_height.to_le_bytes());
+    pv
 }
 
 /// The inclusion path (siblings, leaf→root) for the withdrawal at `index`.
@@ -777,6 +803,34 @@ mod tests {
         assert_eq!(&encoded[encoded.len() - 32..], &[1u8; 32]);
         let after = leaf_hash(&Sha256Hasher, Some(&a));
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn pack_public_values_keys_withdrawals_root_by_batch_seq_not_expiry() {
+        let hasher = Sha256Hasher;
+        let entries = [(owner(1), USDC, Amount(100))];
+        let batch_seq = 7u64;
+        let expiry_height = 0u64;
+        assert_ne!(batch_seq, expiry_height);
+
+        let seq_root = withdrawals_root(&hasher, batch_seq, &entries);
+        let expiry_root = withdrawals_root(&hasher, expiry_height, &entries);
+        assert_ne!(seq_root, expiry_root);
+
+        let matcher = Ed25519PubKey([0x44u8; 32]);
+        let pv = pack_public_values(
+            &[0x11; 32],
+            &[0x22; 32],
+            &seq_root,
+            &matcher,
+            batch_seq,
+            expiry_height,
+        );
+        assert_eq!(pv.len(), PUBLIC_VALUES_LEN);
+        assert_eq!(&pv[64..96], &seq_root);
+        assert_ne!(&pv[64..96], &expiry_root);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
     }
 
     #[test]
