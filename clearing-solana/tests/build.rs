@@ -14,6 +14,14 @@ fn main() {
         "cargo:rerun-if-changed={}",
         program.join("Cargo.toml").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace.join("Cargo.lock").display()
+    );
 
     let status = Command::new("cargo-build-sbf")
         .arg("--manifest-path")
@@ -29,6 +37,7 @@ fn main() {
         .env_remove("CARGO")
         .env_remove("CLIPPY_ARGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
         .status()
         .expect("failed to spawn cargo-build-sbf");
     assert!(status.success(), "cargo-build-sbf failed");

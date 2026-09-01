@@ -9,4 +9,5 @@ clearing-solana-program = { path = "../program" }
 mollusk-svm.workspace = true
 solana-account = "3"
 solana-instruction = "3"
+solana-program-error = "3"
 solana-pubkey = "3"

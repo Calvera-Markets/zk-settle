@@ -1,25 +1,26 @@
 use pinocchio::error::ProgramError;
 
-/// SHA256(b"account:Config")[..8]
-const fn disc(bytes: [u8; 8]) -> [u8; 8] {
-    bytes
-}
-
+/// Copy a packed integer `repr(C)` account struct. `len` must equal `size_of::<T>()`.
 fn pack_bytes<T>(value: &T, dst: &mut [u8], len: usize) -> Result<(), ProgramError> {
-    if dst.len() < len {
+    if len != core::mem::size_of::<T>() || dst.len() < len {
         return Err(ProgramError::InvalidAccountData);
     }
+    // SAFETY: `T` is a packed integer `repr(C)` struct; `len == size_of::<T>()`
+    // and `dst` has at least `len` bytes.
     unsafe {
         core::ptr::copy_nonoverlapping(value as *const T as *const u8, dst.as_mut_ptr(), len);
     }
     Ok(())
 }
 
+/// Load a packed integer `repr(C)` account struct. `len` must equal `size_of::<T>()`.
 fn unpack_bytes<T>(data: &[u8], len: usize) -> Result<T, ProgramError> {
-    if data.len() < len {
+    if len != core::mem::size_of::<T>() || data.len() < len {
         return Err(ProgramError::InvalidAccountData);
     }
     let mut value = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: `T` is a packed integer `repr(C)` struct; `len == size_of::<T>()`
+    // bytes are copied into a fully initialized `T`.
     unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr(), value.as_mut_ptr() as *mut u8, len);
         Ok(value.assume_init())
@@ -50,7 +51,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub const DISC: [u8; 8] = disc([155, 12, 170, 224, 30, 250, 204, 130]);
+    pub const DISC: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -79,7 +80,7 @@ pub struct MintMeta {
 }
 
 impl MintMeta {
-    pub const DISC: [u8; 8] = disc([63, 207, 120, 142, 111, 38, 43, 247]);
+    pub const DISC: [u8; 8] = [63, 207, 120, 142, 111, 38, 43, 247];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -106,7 +107,7 @@ pub struct AccountOwner {
 }
 
 impl AccountOwner {
-    pub const DISC: [u8; 8] = disc([35, 41, 58, 124, 127, 110, 111, 152]);
+    pub const DISC: [u8; 8] = [35, 41, 58, 124, 127, 110, 111, 152];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -138,7 +139,7 @@ pub struct DepositReceipt {
 }
 
 impl DepositReceipt {
-    pub const DISC: [u8; 8] = disc([64, 175, 24, 183, 138, 109, 70, 78]);
+    pub const DISC: [u8; 8] = [64, 175, 24, 183, 138, 109, 70, 78];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -167,7 +168,7 @@ pub struct BatchRecord {
 }
 
 impl BatchRecord {
-    pub const DISC: [u8; 8] = disc([237, 157, 151, 81, 127, 59, 13, 242]);
+    pub const DISC: [u8; 8] = [237, 157, 151, 81, 127, 59, 13, 242];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -192,7 +193,7 @@ pub struct Nullifier {
 }
 
 impl Nullifier {
-    pub const DISC: [u8; 8] = disc([18, 56, 142, 165, 181, 158, 187, 133]);
+    pub const DISC: [u8; 8] = [18, 56, 142, 165, 181, 158, 187, 133];
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn pack(&self, dst: &mut [u8]) -> Result<(), ProgramError> {
@@ -211,10 +212,31 @@ impl Nullifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn account_disc(name: &str) -> [u8; 8] {
+        let mut h = Sha256::new();
+        h.update(b"account:");
+        h.update(name.as_bytes());
+        let digest = h.finalize();
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&digest[..8]);
+        out
+    }
 
     #[test]
     fn config_layout_is_240_and_8_aligned() {
         assert_eq!(Config::LEN, 240);
         assert_eq!(core::mem::align_of::<Config>(), 8);
+    }
+
+    #[test]
+    fn discriminators_match_sha256_account_name() {
+        assert_eq!(Config::DISC, account_disc("Config"));
+        assert_eq!(MintMeta::DISC, account_disc("MintMeta"));
+        assert_eq!(AccountOwner::DISC, account_disc("AccountOwner"));
+        assert_eq!(DepositReceipt::DISC, account_disc("DepositReceipt"));
+        assert_eq!(BatchRecord::DISC, account_disc("BatchRecord"));
+        assert_eq!(Nullifier::DISC, account_disc("Nullifier"));
     }
 }

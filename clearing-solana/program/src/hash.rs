@@ -15,11 +15,6 @@ pub fn hash_da(payload: &[u8]) -> [u8; 32] {
     sha256(&[&[0x02], &len, payload])
 }
 
-/// Depth-128 default hashes. Stubbed this PR.
-pub fn default_hashes() -> [u8; 32] {
-    [0u8; 32]
-}
-
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     {
