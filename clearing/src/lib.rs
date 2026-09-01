@@ -50,10 +50,10 @@ pub mod source;
 pub mod state;
 pub mod tx;
 
-pub use auth::{Ed25519PubKey, Ed25519Signature, Order, SignedOrder, Side};
+pub use auth::{Ed25519PubKey, Ed25519Signature, Order, Side, SignedOrder};
 pub use commitment::{Hash, StateTree};
-pub use da::DaBlob;
 pub use contract::{BatchProposal, MockSettlementContract, SettleError};
+pub use da::DaBlob;
 pub use engine::{BatchOutcome, Engine};
 pub use id::L1Address;
 pub use prover::{ExecutingProver, Proof, Prover, ReplayProver, Witness};

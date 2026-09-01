@@ -5,7 +5,7 @@
 //! settle a random affordable fill, and assert the per-asset totals are
 //! unchanged.
 
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{State, Tx};
@@ -58,8 +58,8 @@ proptest! {
         let quote = quote_num.min(buyer_usdc);
 
         let mut s = fresh();
-        s.apply(&Tx::Deposit { account: buyer(), asset: USDC, amount: Amount(buyer_usdc), nonce: 0, trading_key: None }).unwrap();
-        s.apply(&Tx::Deposit { account: seller(), asset: BTC, amount: Amount(seller_btc), nonce: 1, trading_key: None }).unwrap();
+        s.apply(&Tx::Deposit { account: buyer(), asset: USDC, amount: Amount(buyer_usdc), nonce: 0, owner: L1Address([1u8; 32]), trading_key: None }).unwrap();
+        s.apply(&Tx::Deposit { account: seller(), asset: BTC, amount: Amount(seller_btc), nonce: 1, owner: L1Address([2u8; 32]), trading_key: None }).unwrap();
 
         let usdc_before = total(&s, USDC);
         let btc_before = total(&s, BTC);
