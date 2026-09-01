@@ -1,0 +1,21 @@
+[package]
+name = "clearing-script"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clearing-host"
+path = "src/main.rs"
+
+[features]
+poseidon2 = ["clearing/poseidon2"]
+
+[dependencies]
+sp1-sdk = { version = "6.0.1", features = ["blocking", "native-gnark"] }
+clearing = { path = "../../clearing" }
+uuid = "1.23.2"
+# Sign the maker/taker/matcher orders for the authenticated batch (host side).
+ed25519-dalek = "2"
+
+[build-dependencies]
+sp1-build = "6.0.1"

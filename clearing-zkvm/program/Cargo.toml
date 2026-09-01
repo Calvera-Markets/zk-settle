@@ -1,0 +1,11 @@
+[package]
+name = "clearing-program"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+poseidon2 = ["clearing/poseidon2"]
+
+[dependencies]
+sp1-zkvm = "6.0.1"
+clearing = { path = "../../clearing" }
