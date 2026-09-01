@@ -6,6 +6,7 @@ pub mod instruction;
 pub mod pda;
 pub mod processor;
 pub mod state;
+pub mod token;
 pub mod verifier;
 
 pub use pinocchio::{AccountView as AccountInfo, Address as Pubkey, ProgramResult};
@@ -26,6 +27,14 @@ pub fn dispatch(
         instruction::INITIALIZE => {
             let args = instruction::InitializeArgs::unpack(rest)?;
             processor::initialize::process(program_id, accounts, &args)
+        }
+        instruction::REGISTER_MINT => {
+            let args = instruction::RegisterMintArgs::unpack(rest)?;
+            processor::register_mint::process(program_id, accounts, &args)
+        }
+        instruction::DEPOSIT => {
+            let args = instruction::DepositArgs::unpack(rest)?;
+            processor::deposit::process(program_id, accounts, &args)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

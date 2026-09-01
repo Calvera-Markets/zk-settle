@@ -14,7 +14,6 @@ bpf-entrypoint = []
 [dependencies]
 pinocchio = { workspace = true, features = ["cpi"] }
 pinocchio-system.workspace = true
-# Token-2022 CPI helpers. Unused this PR; required so the 0.10 graph is locked.
 pinocchio-token-2022.workspace = true
 
 [target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]

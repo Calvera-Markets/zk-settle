@@ -65,3 +65,110 @@ impl InitializeArgs {
         out
     }
 }
+
+/// `register_mint` (disc = 1) instruction data after the discriminator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisterMintArgs {
+    pub decimals: u8,
+}
+
+impl RegisterMintArgs {
+    pub const LEN: usize = 1;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        Ok(Self { decimals: data[0] })
+    }
+
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        [REGISTER_MINT, self.decimals]
+    }
+}
+
+/// `deposit` (disc = 2) instruction data after the discriminator.
+///
+/// `trading_key` tag: `0x00` none; `0x01 ‖ [u8;32]` first deposit only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepositArgs {
+    pub account_id: [u8; 16],
+    pub amount: u64,
+    pub trading_key: Option<[u8; 32]>,
+}
+
+impl DepositArgs {
+    pub const LEN_NONE: usize = 16 + 8 + 1;
+    pub const LEN_KEY: usize = 16 + 8 + 1 + 32;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() < Self::LEN_NONE {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut account_id = [0u8; 16];
+        account_id.copy_from_slice(&data[0..16]);
+        let mut amount_bytes = [0u8; 8];
+        amount_bytes.copy_from_slice(&data[16..24]);
+        let amount = u64::from_le_bytes(amount_bytes);
+        let trading_key = match data[24] {
+            0x00 => {
+                if data.len() != Self::LEN_NONE {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                None
+            }
+            0x01 => {
+                if data.len() != Self::LEN_KEY {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&data[25..57]);
+                Some(key)
+            }
+            _ => return Err(ProgramError::InvalidInstructionData),
+        };
+        Ok(Self {
+            account_id,
+            amount,
+            trading_key,
+        })
+    }
+
+    pub fn pack(&self) -> DepositIxBytes {
+        match self.trading_key {
+            None => {
+                let mut out = [0u8; 1 + Self::LEN_NONE];
+                out[0] = DEPOSIT;
+                out[1..17].copy_from_slice(&self.account_id);
+                out[17..25].copy_from_slice(&self.amount.to_le_bytes());
+                out[25] = 0x00;
+                DepositIxBytes::None(out)
+            }
+            Some(key) => {
+                let mut out = [0u8; 1 + Self::LEN_KEY];
+                out[0] = DEPOSIT;
+                out[1..17].copy_from_slice(&self.account_id);
+                out[17..25].copy_from_slice(&self.amount.to_le_bytes());
+                out[25] = 0x01;
+                out[26..58].copy_from_slice(&key);
+                DepositIxBytes::Key(out)
+            }
+        }
+    }
+}
+
+/// Packed `deposit` ix bytes (variable length, no `alloc` on SBF).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DepositIxBytes {
+    None([u8; 1 + DepositArgs::LEN_NONE]),
+    Key([u8; 1 + DepositArgs::LEN_KEY]),
+}
+
+impl DepositIxBytes {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::None(bytes) => bytes,
+            Self::Key(bytes) => bytes,
+        }
+    }
+}
