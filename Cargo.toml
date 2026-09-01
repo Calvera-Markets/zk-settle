@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["clearing"]
 # `clearing-zkvm` is its own workspace (SP1 toolchain). `clearing-circuits`
 # is its own workspace (arkworks Groth16). Excluding them keeps
 # `cargo build --workspace` on the native host crate only.

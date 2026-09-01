@@ -1,0 +1,43 @@
+[package]
+name = "clearing"
+version.workspace = true
+edition.workspace = true
+
+# The clearing layer is a deterministic, off-path consumer of the committed log
+# (see ../docs/zk-validity-feasibility.md): it maintains account state, applies
+# per-instrument settlement, and commits the result. The lib stays
+# dependency-light and pure; heavier concerns (SNARK-friendly hashing, real
+# prover backends) sit behind features so the core can be replayed cheaply and
+# audited in isolation.
+[features]
+default = []
+# A second `Hasher` impl (`commitment::hash_poseidon2::Poseidon2Hasher`),
+# coexisting with the default sha2. Opt-in because it's only used to compare
+# proving cost / for a future custom-circuit path.
+poseidon2 = []
+
+[dependencies]
+serde = { workspace = true }
+# Only `from_u128`/`as_u128` + serde are used (no `v4`/`v5`), so we avoid the
+# random-UUID features that pull `getrandom` — which keeps the zkVM (RISC-V)
+# guest build clean. (In the main workspace, feature unification with other
+# crates still gives uuid its `v4`/`v5`; that's harmless here.)
+uuid = { version = "1.23.2", default-features = false, features = ["serde"] }
+thiserror = { workspace = true }
+# Pinned to the 0.10.x line so the SP1 zkVM build can swap in the accelerated
+# sha-256 precompile (its patch targets sha2 0.10.9). API-compatible with our
+# usage; on non-zkVM targets the patched crate falls back to plain sha2.
+sha2 = "0.10.9"
+# ed25519 for trade authorization (signed maker/taker orders + matcher sig).
+# Verification runs inside `State::apply`, so the executing prover and the SP1
+# guest re-verify it; the guest build swaps in SP1's accelerated ed25519/
+# curve25519 precompile (Phase 4), analogous to the sha2 patch above. Signing is
+# deterministic (RFC 8032), so no RNG feature is needed here.
+ed25519-dalek = "2"
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+# Also a normal dep (above); repeated here so integration tests (`tests/`) — which
+# see only the public API + dev-deps — can sign orders for the authenticated flow.
+ed25519-dalek = "2"
