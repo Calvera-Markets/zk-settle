@@ -38,17 +38,25 @@
 pub mod account;
 pub mod auth;
 pub mod commitment;
+pub mod contract;
+pub mod da;
+pub mod engine;
 pub mod error;
 pub mod id;
 pub mod instrument;
 pub mod prover;
 pub mod settlement;
+pub mod source;
 pub mod state;
 pub mod tx;
 
 pub use auth::{Ed25519PubKey, Ed25519Signature, Order, SignedOrder, Side};
 pub use commitment::{Hash, StateTree};
+pub use da::DaBlob;
+pub use contract::{BatchProposal, MockSettlementContract, SettleError};
+pub use engine::{BatchOutcome, Engine};
 pub use id::L1Address;
 pub use prover::{ExecutingProver, Proof, Prover, ReplayProver, Witness};
+pub use source::{SyntheticSource, TxSource};
 pub use state::{State, StateDelta};
 pub use tx::{OnChainMessage, Tx};
