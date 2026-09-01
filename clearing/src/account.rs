@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::SettlementError;
-use crate::id::{Amount, AssetId, InstrumentId};
+use crate::id::{Amount, AssetId, InstrumentId, L1Address};
 
 /// A derivative position. Present in the type system from day one so the model
 /// is ready for perps/futures, but unused by the spot-swap beachhead (spot
@@ -49,6 +49,9 @@ pub struct Account {
     /// they persist even after the balance drains, so a filled order can never be
     /// re-filled. (Growth: fully-filled orders are never pruned in v1.)
     order_fills: BTreeMap<crate::commitment::Hash, Amount>,
+    /// L1 owner (Solana pubkey) bound at first deposit. Ignored by [`Self::is_empty`]:
+    /// an owner-only account is pruned and rebound on the next first deposit.
+    l1_owner: Option<L1Address>,
 }
 
 impl Account {
@@ -133,10 +136,31 @@ impl Account {
         }
     }
 
+    /// The L1 owner bound to this account, if any.
+    pub fn l1_owner(&self) -> Option<L1Address> {
+        self.l1_owner
+    }
+
+    /// Bind the L1 owner. First call wins; a later call must match or
+    /// [`SettlementError::OwnerMismatch`].
+    pub fn set_l1_owner(&mut self, owner: L1Address) -> Result<(), SettlementError> {
+        match self.l1_owner {
+            Some(existing) if existing != owner => Err(SettlementError::OwnerMismatch),
+            Some(_) => Ok(()),
+            None => {
+                self.l1_owner = Some(owner);
+                Ok(())
+            }
+        }
+    }
+
     /// Cumulative base filled against `order_id` (zero if this account has never
     /// been filled on it).
     pub fn order_filled(&self, order_id: &crate::commitment::Hash) -> Amount {
-        self.order_fills.get(order_id).copied().unwrap_or(Amount::ZERO)
+        self.order_fills
+            .get(order_id)
+            .copied()
+            .unwrap_or(Amount::ZERO)
     }
 
     /// Add `base` to the cumulative fill of `order_id`. Checked (overflow errors).
@@ -158,7 +182,8 @@ impl Account {
     /// An account is empty (⇒ hashes to the empty leaf, ⇒ absent from the tree)
     /// only when it holds nothing, has no registered key, **and** has no recorded
     /// order fills — so a registered or previously-trading account stays committed
-    /// (keeping its key and its anti-replay fill records).
+    /// (keeping its key and its anti-replay fill records). The L1 owner is
+    /// ignored: an owner-only account is empty and pruned.
     pub fn is_empty(&self) -> bool {
         self.balances.is_empty()
             && self.positions.is_empty()
@@ -225,6 +250,18 @@ mod tests {
         assert_eq!(
             a.debit(acct(), USDC, Amount(-1)),
             Err(SettlementError::NonPositiveQuantity)
+        );
+    }
+
+    #[test]
+    fn owner_alone_is_empty() {
+        let mut a = Account::new();
+        a.set_l1_owner(L1Address([1u8; 32])).unwrap();
+        assert!(a.is_empty());
+        a.set_l1_owner(L1Address([1u8; 32])).unwrap();
+        assert_eq!(
+            a.set_l1_owner(L1Address([2u8; 32])),
+            Err(SettlementError::OwnerMismatch)
         );
     }
 }

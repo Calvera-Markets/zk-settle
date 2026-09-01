@@ -75,7 +75,9 @@ impl Witness {
         let mut seen_markets = BTreeSet::new();
         let mut instruments = Vec::new();
         for tx in txs {
-            let Tx::Trade { market, .. } = tx else { continue };
+            let Tx::Trade { market, .. } = tx else {
+                continue;
+            };
             if !seen_markets.insert(*market) {
                 continue;
             }
@@ -87,16 +89,18 @@ impl Witness {
         let mut updates = Vec::new();
         let mut messages = Vec::new();
         for tx in txs {
+            // Owner is read before apply: a full withdraw prunes the account
+            // (`is_empty` ignores owner), so the post-apply account may be gone.
+            let withdraw_owner = match tx {
+                Tx::Withdraw { account, .. } => state.account(*account).and_then(|a| a.l1_owner()),
+                _ => None,
+            };
             if let Ok(delta) = state.apply(tx) {
                 updates.extend(tree.apply_delta_proved(state, &delta));
-                if let Tx::Withdraw {
-                    account,
-                    asset,
-                    amount,
-                } = tx
-                {
+                if let Tx::Withdraw { asset, amount, .. } = tx {
                     messages.push(OnChainMessage::Withdraw {
-                        owner: account.l1_owner(),
+                        owner: withdraw_owner
+                            .expect("withdraw of an account with no owner cannot apply"),
                         asset: *asset,
                         amount: *amount,
                     });
@@ -122,12 +126,25 @@ fn verify_chain<H: Hasher>(hasher: &H, witness: &Witness) -> Result<(), ProveErr
     let defaults = default_hashes(hasher); // computed once; fills sparse-proof gaps
     let mut current = witness.prev_root;
     for (index, u) in witness.updates.iter().enumerate() {
-        if root_from_path(hasher, &defaults, u.key, u.prev_leaf, u.sibling_mask, &u.siblings)
-            != current
+        if root_from_path(
+            hasher,
+            &defaults,
+            u.key,
+            u.prev_leaf,
+            u.sibling_mask,
+            &u.siblings,
+        ) != current
         {
             return Err(ProveError::ChainBroken { index });
         }
-        current = root_from_path(hasher, &defaults, u.key, u.new_leaf, u.sibling_mask, &u.siblings);
+        current = root_from_path(
+            hasher,
+            &defaults,
+            u.key,
+            u.new_leaf,
+            u.sibling_mask,
+            &u.siblings,
+        );
     }
     if current != witness.new_root {
         return Err(ProveError::NewRootMismatch);
@@ -237,13 +254,21 @@ impl<H: Hasher> ExecutingProver<H> {
     /// A prover with no operator key — reproduces unauthenticated batches (used by
     /// lower-level settlement/commitment tests).
     pub fn new(hasher: H) -> Self {
-        Self { hasher, operator_key: None, batch_height: 0 }
+        Self {
+            hasher,
+            operator_key: None,
+            batch_height: 0,
+        }
     }
 
     /// A prover configured with the trusted matcher key + batch height, so it
     /// re-verifies trade authorization exactly as the live state did.
     pub fn with_auth(hasher: H, operator_key: Ed25519PubKey, batch_height: u64) -> Self {
-        Self { hasher, operator_key: Some(operator_key), batch_height }
+        Self {
+            hasher,
+            operator_key: Some(operator_key),
+            batch_height,
+        }
     }
 }
 
@@ -290,17 +315,17 @@ impl<H: Hasher> Prover for ExecutingProver<H> {
         );
         let mut produced = Vec::new();
         for tx in &witness.txs {
+            let withdraw_owner = match tx {
+                Tx::Withdraw { account, .. } => replay.account(*account).and_then(|a| a.l1_owner()),
+                _ => None,
+            };
             if replay.apply(tx).is_err() {
                 continue;
             }
-            if let Tx::Withdraw {
-                account,
-                asset,
-                amount,
-            } = tx
-            {
+            if let Tx::Withdraw { asset, amount, .. } = tx {
                 produced.push(OnChainMessage::Withdraw {
-                    owner: account.l1_owner(),
+                    owner: withdraw_owner
+                        .expect("withdraw of an account with no owner cannot apply"),
                     asset: *asset,
                     amount: *amount,
                 });
@@ -328,7 +353,7 @@ impl<H: Hasher> Prover for ExecutingProver<H> {
 mod tests {
     use super::*;
     use crate::commitment::hash_plain::Sha256Hasher;
-    use crate::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+    use crate::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;
     use uuid::Uuid;
@@ -338,6 +363,9 @@ mod tests {
 
     fn acct(i: u128) -> AccountId {
         AccountId(Uuid::from_u128(i))
+    }
+    fn owner(n: u8) -> L1Address {
+        L1Address([n; 32])
     }
     fn market() -> MarketId {
         MarketId(Uuid::from_u128(0xA1))
@@ -366,6 +394,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: owner(1),
                 trading_key: None,
             },
             Tx::Deposit {
@@ -373,6 +402,7 @@ mod tests {
                 asset: BTC,
                 amount: Amount(5),
                 nonce: 1,
+                owner: owner(2),
                 trading_key: None,
             },
             Tx::Trade {
@@ -460,6 +490,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: owner(1),
                 trading_key: None,
             },
             Tx::Withdraw {
@@ -508,7 +539,7 @@ mod tests {
         ReplayProver::new(Sha256Hasher).prove(&w).unwrap();
 
         w.messages.push(OnChainMessage::Withdraw {
-            owner: acct(0xB).l1_owner(),
+            owner: owner(1),
             asset: USDC,
             amount: Amount(999),
         });
@@ -535,6 +566,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: owner(1),
                 trading_key: None,
             }],
         );
@@ -590,27 +622,63 @@ mod tests {
             s.set_operator_key(op_pk);
 
             let buy = Order {
-                account: acct(0xB), market: market(), side: Side::Buy,
-                base_amount: Amount(5), limit_price: Amount(250), expiry: 100, salt: 1,
+                account: acct(0xB),
+                market: market(),
+                side: Side::Buy,
+                base_amount: Amount(5),
+                limit_price: Amount(250),
+                expiry: 100,
+                salt: 1,
             };
             let sell = Order {
-                account: acct(0x5), market: market(), side: Side::Sell,
-                base_amount: Amount(5), limit_price: Amount(180), expiry: 100, salt: 2,
+                account: acct(0x5),
+                market: market(),
+                side: Side::Sell,
+                base_amount: Amount(5),
+                limit_price: Amount(180),
+                expiry: 100,
+                salt: 2,
             };
             let f = Fill {
-                buyer: acct(0xB), seller: acct(0x5),
-                base_amount: Amount(2), quote_amount: Amount(400),
+                buyer: acct(0xB),
+                seller: acct(0x5),
+                base_amount: Amount(2),
+                quote_amount: Amount(400),
             };
             let m = encode_matcher_msg(market(), &order_id(&buy), &order_id(&sell), &f);
             let auth = TradeAuth {
-                buy: SignedOrder { order: buy, sig: sig(&buyer_sk, &encode_order(&buy)) },
-                sell: SignedOrder { order: sell, sig: sig(&seller_sk, &encode_order(&sell)) },
+                buy: SignedOrder {
+                    order: buy,
+                    sig: sig(&buyer_sk, &encode_order(&buy)),
+                },
+                sell: SignedOrder {
+                    order: sell,
+                    sig: sig(&seller_sk, &encode_order(&sell)),
+                },
                 matcher_sig: sig(&op_sk, &m),
             };
             let batch = vec![
-                Tx::Deposit { account: acct(0xB), asset: USDC, amount: Amount(1000), nonce: 0, trading_key: Some(buyer_pk) },
-                Tx::Deposit { account: acct(0x5), asset: BTC, amount: Amount(5), nonce: 1, trading_key: Some(seller_pk) },
-                Tx::Trade { market: market(), fill: f, auth: Some(Box::new(auth)) },
+                Tx::Deposit {
+                    account: acct(0xB),
+                    asset: USDC,
+                    amount: Amount(1000),
+                    nonce: 0,
+                    owner: owner(1),
+                    trading_key: Some(buyer_pk),
+                },
+                Tx::Deposit {
+                    account: acct(0x5),
+                    asset: BTC,
+                    amount: Amount(5),
+                    nonce: 1,
+                    owner: owner(2),
+                    trading_key: Some(seller_pk),
+                },
+                Tx::Trade {
+                    market: market(),
+                    fill: f,
+                    auth: Some(Box::new(auth)),
+                },
             ];
             (s, t, batch)
         }
@@ -639,7 +707,10 @@ mod tests {
             // reflect the (authorized) trade, but replay now rejects it, so the
             // re-executed leaves diverge from the committed ones.
             for tx in w.txs.iter_mut() {
-                if let Tx::Trade { auth: Some(auth), .. } = tx {
+                if let Tx::Trade {
+                    auth: Some(auth), ..
+                } = tx
+                {
                     auth.matcher_sig.r[0] ^= 0xFF;
                 }
             }

@@ -24,10 +24,12 @@
 use clearing::auth::{Ed25519PubKey, Ed25519Signature, Order, Side, SignedOrder, TradeAuth};
 use clearing::commitment::hash_plain::Sha256Hasher;
 use clearing::commitment::{encode_matcher_msg, encode_order, order_id, withdrawal_proof};
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
-use clearing::{Engine, ExecutingProver, MockSettlementContract, ReplayProver, StateTree, Tx};
+use clearing::{
+    Engine, ExecutingProver, MockSettlementContract, ReplayProver, SettleError, StateTree, Tx,
+};
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
 
@@ -39,6 +41,12 @@ fn buyer() -> AccountId {
 }
 fn seller() -> AccountId {
     AccountId(Uuid::from_u128(0x5))
+}
+fn buyer_owner() -> L1Address {
+    L1Address([1u8; 32])
+}
+fn seller_owner() -> L1Address {
+    L1Address([2u8; 32])
 }
 fn market() -> MarketId {
     MarketId(Uuid::from_u128(0xA1))
@@ -75,8 +83,12 @@ fn deposit_trade_withdraw_settles_and_stays_solvent() {
     // ---- Batch 1: deposits ------------------------------------------------
     // The contract escrows and issues each deposit tx; the engine includes them;
     // verifying the batch finalizes the L2 credit.
-    let d_buyer = contract.deposit(buyer(), USDC, Amount(1000)).unwrap();
-    let d_seller = contract.deposit(seller(), BTC, Amount(5)).unwrap();
+    let d_buyer = contract
+        .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+        .unwrap();
+    let d_seller = contract
+        .deposit(seller(), BTC, Amount(5), seller_owner())
+        .unwrap();
     let o1 = engine.step(vec![d_buyer, d_seller]).unwrap();
     assert_eq!(o1.prev_root(), genesis());
 
@@ -119,8 +131,8 @@ fn deposit_trade_withdraw_settles_and_stays_solvent() {
             amount: Amount(100),
         }])
         .unwrap();
-    // The withdrawal emits exactly one on-chain message; the buyer's L1 owner is
-    // the destination (v0 convention: same UUID as the account).
+    // The withdrawal emits exactly one on-chain message; destination is the
+    // L1 owner bound at deposit (the Solana pubkey, not the account id).
     assert_eq!(o3.messages.len(), 1);
 
     contract.commit(o3.proposal()).unwrap();
@@ -135,7 +147,7 @@ fn deposit_trade_withdraw_settles_and_stays_solvent() {
 
     // The buyer PULLS the payout asynchronously: prove inclusion in batch 2's
     // (the 3rd finalized batch) withdrawals root, get paid, nullify.
-    let owner = buyer().l1_owner();
+    let owner = buyer_owner();
     let entries = [(owner, USDC, Amount(100))];
     let siblings = withdrawal_proof(&Sha256Hasher, 2, &entries, 0);
     contract
@@ -189,8 +201,12 @@ fn fail_spoof_withdraw() {
     let mut contract = MockSettlementContract::new(ExecutingProver::new(Sha256Hasher), genesis());
 
     // Fund + trade so the buyer's L2 USDC (600) is below their escrowed 1000.
-    let d_buyer = contract.deposit(buyer(), USDC, Amount(1000)).unwrap();
-    let d_seller = contract.deposit(seller(), BTC, Amount(5)).unwrap();
+    let d_buyer = contract
+        .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+        .unwrap();
+    let d_seller = contract
+        .deposit(seller(), BTC, Amount(5), seller_owner())
+        .unwrap();
     let o1 = engine.step(vec![d_buyer, d_seller]).unwrap();
     contract.commit(o1.proposal()).unwrap();
     contract.verify_next(&Sha256Hasher).unwrap();
@@ -265,7 +281,10 @@ fn authed_engine() -> AuthedSetup {
 
     // Both the engine's prover and the contract's verifier carry the operator key
     // (verifier config, not witness data), so both enforce authorization.
-    let mut e = Engine::new(Sha256Hasher, ExecutingProver::with_auth(Sha256Hasher, op_pk, 0));
+    let mut e = Engine::new(
+        Sha256Hasher,
+        ExecutingProver::with_auth(Sha256Hasher, op_pk, 0),
+    );
     e.register_market(
         market(),
         Instrument {
@@ -278,28 +297,68 @@ fn authed_engine() -> AuthedSetup {
         },
     );
     e.set_operator_key(op_pk);
-    let c = MockSettlementContract::new(ExecutingProver::with_auth(Sha256Hasher, op_pk, 0), genesis());
+    let c = MockSettlementContract::new(
+        ExecutingProver::with_auth(Sha256Hasher, op_pk, 0),
+        genesis(),
+    );
     (e, c, buyer_sk, seller_sk, op_sk)
 }
 
 fn buy_order() -> Order {
-    Order { account: buyer(), market: market(), side: Side::Buy, base_amount: Amount(5), limit_price: Amount(250), expiry: 1000, salt: 1 }
+    Order {
+        account: buyer(),
+        market: market(),
+        side: Side::Buy,
+        base_amount: Amount(5),
+        limit_price: Amount(250),
+        expiry: 1000,
+        salt: 1,
+    }
 }
 fn sell_order() -> Order {
-    Order { account: seller(), market: market(), side: Side::Sell, base_amount: Amount(5), limit_price: Amount(180), expiry: 1000, salt: 2 }
+    Order {
+        account: seller(),
+        market: market(),
+        side: Side::Sell,
+        base_amount: Amount(5),
+        limit_price: Amount(180),
+        expiry: 1000,
+        salt: 2,
+    }
 }
 
 /// A fully-signed trade tx for a `base`/`quote` fill.
-fn signed_trade(buyer_sk: &SigningKey, seller_sk: &SigningKey, op_sk: &SigningKey, base: i128, quote: i128) -> Tx {
-    let f = Fill { buyer: buyer(), seller: seller(), base_amount: Amount(base), quote_amount: Amount(quote) };
+fn signed_trade(
+    buyer_sk: &SigningKey,
+    seller_sk: &SigningKey,
+    op_sk: &SigningKey,
+    base: i128,
+    quote: i128,
+) -> Tx {
+    let f = Fill {
+        buyer: buyer(),
+        seller: seller(),
+        base_amount: Amount(base),
+        quote_amount: Amount(quote),
+    };
     let (buy, sell) = (buy_order(), sell_order());
     let m = encode_matcher_msg(market(), &order_id(&buy), &order_id(&sell), &f);
     let auth = TradeAuth {
-        buy: SignedOrder { order: buy, sig: sig(buyer_sk, &encode_order(&buy)) },
-        sell: SignedOrder { order: sell, sig: sig(seller_sk, &encode_order(&sell)) },
+        buy: SignedOrder {
+            order: buy,
+            sig: sig(buyer_sk, &encode_order(&buy)),
+        },
+        sell: SignedOrder {
+            order: sell,
+            sig: sig(seller_sk, &encode_order(&sell)),
+        },
         matcher_sig: sig(op_sk, &m),
     };
-    Tx::Trade { market: market(), fill: f, auth: Some(Box::new(auth)) }
+    Tx::Trade {
+        market: market(),
+        fill: f,
+        auth: Some(Box::new(auth)),
+    }
 }
 
 #[test]
@@ -309,8 +368,22 @@ fn authenticated_trade_settles_through_the_contract() {
     // Batch 1: fund + register both trading keys (folded into the first deposit).
     let o1 = engine
         .step(vec![
-            Tx::Deposit { account: buyer(), asset: USDC, amount: Amount(1000), nonce: 0, trading_key: Some(kp(1).1) },
-            Tx::Deposit { account: seller(), asset: BTC, amount: Amount(5), nonce: 1, trading_key: Some(kp(2).1) },
+            Tx::Deposit {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(1000),
+                nonce: 0,
+                owner: buyer_owner(),
+                trading_key: Some(kp(1).1),
+            },
+            Tx::Deposit {
+                account: seller(),
+                asset: BTC,
+                amount: Amount(5),
+                nonce: 1,
+                owner: seller_owner(),
+                trading_key: Some(kp(2).1),
+            },
         ])
         .unwrap();
     contract.commit(o1.proposal()).unwrap();
@@ -318,7 +391,9 @@ fn authenticated_trade_settles_through_the_contract() {
 
     // Batch 2: a fully-signed trade. Authorized at capture, re-verified by the
     // contract's auth verifier.
-    let o2 = engine.step(vec![signed_trade(&b, &se, &op, 2, 400)]).unwrap();
+    let o2 = engine
+        .step(vec![signed_trade(&b, &se, &op, 2, 400)])
+        .unwrap();
     contract.commit(o2.proposal()).unwrap();
     assert_eq!(contract.verify_next(&Sha256Hasher).unwrap(), o2.new_root());
     assert_eq!(engine.state().balance(buyer(), BTC), Amount(2));
@@ -336,8 +411,22 @@ fn contract_rejects_forged_trade() {
 
     let o1 = engine
         .step(vec![
-            Tx::Deposit { account: buyer(), asset: USDC, amount: Amount(1000), nonce: 0, trading_key: Some(kp(1).1) },
-            Tx::Deposit { account: seller(), asset: BTC, amount: Amount(5), nonce: 1, trading_key: Some(kp(2).1) },
+            Tx::Deposit {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(1000),
+                nonce: 0,
+                owner: buyer_owner(),
+                trading_key: Some(kp(1).1),
+            },
+            Tx::Deposit {
+                account: seller(),
+                asset: BTC,
+                amount: Amount(5),
+                nonce: 1,
+                owner: seller_owner(),
+                trading_key: Some(kp(2).1),
+            },
         ])
         .unwrap();
     contract.commit(o1.proposal()).unwrap();
@@ -345,10 +434,15 @@ fn contract_rejects_forged_trade() {
 
     // Produce a valid trade proposal, then tamper the matcher signature — the
     // roots still reflect the (authorized) trade.
-    let o2 = engine.step(vec![signed_trade(&b, &se, &op, 2, 400)]).unwrap();
+    let o2 = engine
+        .step(vec![signed_trade(&b, &se, &op, 2, 400)])
+        .unwrap();
     let mut proposal = o2.proposal();
     for tx in proposal.witness.txs.iter_mut() {
-        if let Tx::Trade { auth: Some(auth), .. } = tx {
+        if let Tx::Trade {
+            auth: Some(auth), ..
+        } = tx
+        {
             auth.matcher_sig.r[0] ^= 0xFF;
         }
     }
@@ -357,4 +451,58 @@ fn contract_rejects_forged_trade() {
     contract.commit(proposal).unwrap(); // commit only checks the (untampered) prev_root
     assert!(contract.verify_next(&Sha256Hasher).is_err()); // proof re-verification rejects it
     assert_eq!(contract.root(), root_before); // root did not advance
+}
+
+/// DA-reconstructed leaf for account B, caller A, valid sparse path: escape
+/// must reject `OwnerMismatch` and leave escrow untouched.
+#[test]
+fn escape_rejects_theft_of_another_accounts_leaf() {
+    let mut engine = engine();
+    let mut contract = MockSettlementContract::new(ExecutingProver::new(Sha256Hasher), genesis());
+
+    let d_buyer = contract
+        .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+        .unwrap();
+    let d_seller = contract
+        .deposit(seller(), BTC, Amount(5), seller_owner())
+        .unwrap();
+    let o1 = engine.step(vec![d_buyer, d_seller]).unwrap();
+    contract.commit(o1.proposal()).unwrap();
+    contract.verify_next(&Sha256Hasher).unwrap();
+
+    let o2 = engine
+        .step(vec![Tx::Trade {
+            market: market(),
+            fill: Fill {
+                buyer: buyer(),
+                seller: seller(),
+                base_amount: Amount(2),
+                quote_amount: Amount(400),
+            },
+            auth: None,
+        }])
+        .unwrap();
+    contract.commit(o2.proposal()).unwrap();
+    contract.verify_next(&Sha256Hasher).unwrap();
+
+    contract.freeze();
+    let accounts = clearing::da::reconstruct(contract.da_blobs());
+    let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
+    let seller_acct = accounts.get(&seller()).cloned().unwrap();
+    let (mask, sibs) = tree.prove(seller());
+
+    let escrow_before = contract.total_escrow(USDC);
+    assert_eq!(
+        contract.escape_withdraw(
+            &Sha256Hasher,
+            seller(),
+            &seller_acct,
+            mask,
+            &sibs,
+            USDC,
+            buyer_owner(),
+        ),
+        Err(SettleError::OwnerMismatch)
+    );
+    assert_eq!(contract.total_escrow(USDC), escrow_before);
 }

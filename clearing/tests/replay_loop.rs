@@ -4,7 +4,7 @@
 //! final root is the canonical rebuild of the final state.
 
 use clearing::commitment::hash_plain::Sha256Hasher;
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{Engine, ReplayProver, StateTree, SyntheticSource, Tx};
@@ -48,6 +48,7 @@ fn scripted_scenario_clears_proves_and_chains() {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: L1Address([1u8; 32]),
                 trading_key: None,
             },
             Tx::Deposit {
@@ -55,6 +56,7 @@ fn scripted_scenario_clears_proves_and_chains() {
                 asset: BTC,
                 amount: Amount(5),
                 nonce: 1,
+                owner: L1Address([2u8; 32]),
                 trading_key: None,
             },
         ],

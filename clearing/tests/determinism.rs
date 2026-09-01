@@ -6,7 +6,7 @@
 //! on to re-derive the same state root. Transactions that reject are fine: they
 //! reject identically and leave state unchanged on both sides.
 
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{State, Tx};
@@ -50,6 +50,7 @@ fn tx_strategy() -> impl Strategy<Value = Tx> {
                 asset: asset(b),
                 amount: Amount(amt),
                 nonce,
+                owner: L1Address([a; 32]),
                 trading_key: None,
             }
         }),
