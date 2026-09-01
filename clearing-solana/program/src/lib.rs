@@ -27,6 +27,7 @@ pub fn dispatch(
             let args = instruction::InitializeArgs::unpack(rest)?;
             processor::initialize::process(program_id, accounts, &args)
         }
+        instruction::VERIFY_PLAIN => verifier::process(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
