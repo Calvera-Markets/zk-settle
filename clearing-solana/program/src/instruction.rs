@@ -9,6 +9,8 @@ pub const FREEZE: u8 = 5;
 pub const ESCAPE_WITHDRAW: u8 = 6;
 pub const SET_ADMIN: u8 = 7;
 pub const ROTATE_VK: u8 = 8;
+/// KAT-only plain Groth16 verify (no funds, no root). Settle will reuse `verifier`.
+pub const VERIFY_PLAIN: u8 = 9;
 
 /// `initialize` (disc = 0) instruction data after the discriminator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
