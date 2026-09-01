@@ -1,0 +1,29 @@
+[package]
+name = "clearing-solana-program"
+version.workspace = true
+edition.workspace = true
+description = "Pinocchio settlement program (Token-2022 custody + Groth16-gated root)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+bpf-entrypoint = []
+
+[dependencies]
+pinocchio = { workspace = true, features = ["cpi"] }
+pinocchio-system.workspace = true
+# Token-2022 CPI helpers. Unused this PR; required so the 0.10 graph is locked.
+pinocchio-token-2022.workspace = true
+
+[target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
+sha2.workspace = true
+solana-address = { version = "2", features = ["curve25519"] }
+# Host-only this PR: arkworks graph is not SBF-safe. Verifier lands later.
+groth16-solana.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+] }

@@ -1,9 +1,10 @@
 [workspace]
 members = ["clearing"]
 # `clearing-zkvm` is its own workspace (SP1 toolchain). `clearing-circuits`
-# is its own workspace (arkworks Groth16). Excluding them keeps
+# is its own workspace (arkworks Groth16). `clearing-solana` is its own
+# workspace (Pinocchio / platform-tools). Excluding them keeps
 # `cargo build --workspace` on the native host crate only.
-exclude = ["clearing-zkvm", "clearing-circuits"]
+exclude = ["clearing-zkvm", "clearing-circuits", "clearing-solana"]
 resolver = "3"
 
 
