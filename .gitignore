@@ -1,0 +1,10 @@
+debug/
+target/
+**/target/
+
+perf.data
+
+__pycache__/
+
+# Design notes are local-only.
+docs/

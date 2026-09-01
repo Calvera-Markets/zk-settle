@@ -1,0 +1,19 @@
+[workspace]
+members = []
+# `clearing-zkvm` is its own workspace (SP1 toolchain). `clearing-circuits`
+# is its own workspace (arkworks Groth16). Excluding them keeps
+# `cargo build --workspace` on the native host crate only.
+exclude = ["clearing-zkvm", "clearing-circuits"]
+resolver = "3"
+
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+
+[workspace.dependencies]
+proptest = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
