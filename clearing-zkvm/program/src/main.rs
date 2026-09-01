@@ -20,6 +20,7 @@
 sp1_zkvm::entrypoint!(main);
 
 use clearing::auth::Ed25519PubKey;
+use clearing::commitment::{pack_public_values, withdrawals_root};
 use clearing::{ExecutingProver, OnChainMessage, Prover, Witness};
 
 #[cfg(not(feature = "poseidon2"))]
@@ -52,14 +53,14 @@ pub fn main() {
              }| (*owner, *asset, *amount),
         )
         .collect();
-    let w_root = clearing::commitment::withdrawals_root(&H::default(), batch_seq, &entries);
-
-    let mut pv = [0u8; 144];
-    pv[0..32].copy_from_slice(&witness.prev_root);
-    pv[32..64].copy_from_slice(&witness.new_root);
-    pv[64..96].copy_from_slice(&w_root);
-    pv[96..128].copy_from_slice(&matcher_key.0);
-    pv[128..136].copy_from_slice(&batch_seq.to_le_bytes());
-    pv[136..144].copy_from_slice(&expiry_height.to_le_bytes());
+    let w_root = withdrawals_root(&H::default(), batch_seq, &entries);
+    let pv = pack_public_values(
+        &witness.prev_root,
+        &witness.new_root,
+        &w_root,
+        &matcher_key,
+        batch_seq,
+        expiry_height,
+    );
     sp1_zkvm::io::commit_slice(&pv);
 }

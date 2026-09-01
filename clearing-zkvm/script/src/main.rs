@@ -15,7 +15,10 @@
 //! proof of that execution.
 
 use clearing::auth::{Ed25519PubKey, Ed25519Signature, Order, Side, SignedOrder, TradeAuth};
-use clearing::commitment::{encode_matcher_msg, encode_order, order_id, withdrawals_root};
+use clearing::commitment::{
+    encode_matcher_msg, encode_order, order_id, pack_public_values, withdrawals_root,
+    PUBLIC_VALUES_LEN,
+};
 use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
@@ -34,9 +37,6 @@ use uuid::Uuid;
 
 const ELF: Elf = include_elf!("clearing-program");
 
-/// Packed public-values width committed by the guest as a single slice.
-const PUBLIC_VALUES_LEN: usize = 144;
-
 fn keypair(seed: u8) -> (SigningKey, Ed25519PubKey) {
     let sk = SigningKey::from_bytes(&[seed; 32]);
     let pk = Ed25519PubKey(sk.verifying_key().to_bytes());
@@ -46,32 +46,11 @@ fn sign(sk: &SigningKey, msg: &[u8]) -> Ed25519Signature {
     Ed25519Signature::from_bytes(sk.sign(msg).to_bytes())
 }
 
-/// Guest public-values layout (144 bytes, little-endian u64s):
-///   0..32 prev_root | 32..64 new_root | 64..96 withdrawals_root
-///   96..128 matcher_key | 128..136 batch_seq | 136..144 expiry_height
-fn pack_public_values(
-    prev_root: &[u8; 32],
-    new_root: &[u8; 32],
-    w_root: &[u8; 32],
-    matcher_key: &Ed25519PubKey,
-    batch_seq: u64,
-    expiry_height: u64,
-) -> [u8; PUBLIC_VALUES_LEN] {
-    let mut pv = [0u8; PUBLIC_VALUES_LEN];
-    pv[0..32].copy_from_slice(prev_root);
-    pv[32..64].copy_from_slice(new_root);
-    pv[64..96].copy_from_slice(w_root);
-    pv[96..128].copy_from_slice(&matcher_key.0);
-    pv[128..136].copy_from_slice(&batch_seq.to_le_bytes());
-    pv[136..144].copy_from_slice(&expiry_height.to_le_bytes());
-    pv
-}
-
 fn expected_public_values(
     witness: &Witness,
     matcher_key: &Ed25519PubKey,
-    expiry_height: u64,
     batch_seq: u64,
+    expiry_height: u64,
 ) -> [u8; PUBLIC_VALUES_LEN] {
     let entries: Vec<_> = witness
         .messages
@@ -98,12 +77,13 @@ fn expected_public_values(
 fn write_stdin(
     witness: &Witness,
     matcher_key: &Ed25519PubKey,
-    expiry_height: u64,
     batch_seq: u64,
+    expiry_height: u64,
 ) -> SP1Stdin {
     let mut stdin = SP1Stdin::new();
     stdin.write(witness);
     stdin.write(matcher_key);
+    // Guest reads expiry_height then batch_seq; params follow the byte layout.
     stdin.write(&expiry_height);
     stdin.write(&batch_seq);
     stdin
@@ -244,12 +224,12 @@ fn main() {
         .prove(&witness)
         .expect("witness should be valid");
 
-    let expected = expected_public_values(&witness, &matcher_key, expiry_height, batch_seq);
+    let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
 
     let client = ProverClient::from_env();
 
     // Execute: run the guest in the zkVM, get the committed public outputs.
-    let stdin = write_stdin(&witness, &matcher_key, expiry_height, batch_seq);
+    let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
     let t_exec = std::time::Instant::now();
     let (public, report) = client.execute(ELF, stdin).run().expect("execute failed");
     let exec_time = t_exec.elapsed();
@@ -283,7 +263,7 @@ fn main() {
 
         let req = client.prove(
             &pk,
-            write_stdin(&witness, &matcher_key, expiry_height, batch_seq),
+            write_stdin(&witness, &matcher_key, batch_seq, expiry_height),
         );
         // Core is fast; Groth16 is the on-chain artifact and the expensive one
         // (the gnark wrap). `.groth16()` is a consuming builder that returns the
@@ -381,7 +361,7 @@ mod tests {
     fn expected_public_values_from_demo_witness() {
         let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
         assert!(!witness.messages.is_empty());
-        let pv = expected_public_values(&witness, &matcher_key, expiry_height, batch_seq);
+        let pv = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
         assert_eq!(&pv[0..32], &witness.prev_root);
         assert_eq!(&pv[32..64], &witness.new_root);
         assert_eq!(&pv[96..128], &matcher_key.0);
@@ -389,6 +369,35 @@ mod tests {
         assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
         assert_eq!(batch_seq, 0);
         assert_eq!(expiry_height, 0);
+    }
+
+    #[test]
+    fn withdrawals_root_in_public_values_is_keyed_by_batch_seq_not_expiry() {
+        let (witness, matcher_key, _, _) = build_witness(1);
+        let batch_seq = 7u64;
+        let expiry_height = 99u64;
+        assert_ne!(batch_seq, expiry_height);
+
+        let entries: Vec<_> = witness
+            .messages
+            .iter()
+            .map(
+                |OnChainMessage::Withdraw {
+                     owner,
+                     asset,
+                     amount,
+                 }| (*owner, *asset, *amount),
+            )
+            .collect();
+        let seq_root = withdrawals_root(&H::default(), batch_seq, &entries);
+        let expiry_root = withdrawals_root(&H::default(), expiry_height, &entries);
+        assert_ne!(seq_root, expiry_root);
+
+        let pv = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+        assert_eq!(&pv[64..96], &seq_root);
+        assert_ne!(&pv[64..96], &expiry_root);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
     }
 
     #[test]
