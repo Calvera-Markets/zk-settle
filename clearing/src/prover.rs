@@ -98,12 +98,19 @@ impl Witness {
             if let Ok(delta) = state.apply(tx) {
                 updates.extend(tree.apply_delta_proved(state, &delta));
                 if let Tx::Withdraw { asset, amount, .. } = tx {
-                    messages.push(OnChainMessage::Withdraw {
-                        owner: withdraw_owner
-                            .expect("withdraw of an account with no owner cannot apply"),
-                        asset: *asset,
-                        amount: *amount,
-                    });
+                    // Apply rejects ownerless withdraws; a successful debit
+                    // therefore had a bound owner (read pre-apply, before prune).
+                    debug_assert!(
+                        withdraw_owner.is_some(),
+                        "withdraw of an account with no owner cannot apply"
+                    );
+                    if let Some(owner) = withdraw_owner {
+                        messages.push(OnChainMessage::Withdraw {
+                            owner,
+                            asset: *asset,
+                            amount: *amount,
+                        });
+                    }
                 }
             }
         }
@@ -323,9 +330,11 @@ impl<H: Hasher> Prover for ExecutingProver<H> {
                 continue;
             }
             if let Tx::Withdraw { asset, amount, .. } = tx {
+                let Some(owner) = withdraw_owner else {
+                    return Err(ProveError::MessageMismatch);
+                };
                 produced.push(OnChainMessage::Withdraw {
-                    owner: withdraw_owner
-                        .expect("withdraw of an account with no owner cannot apply"),
+                    owner,
                     asset: *asset,
                     amount: *amount,
                 });

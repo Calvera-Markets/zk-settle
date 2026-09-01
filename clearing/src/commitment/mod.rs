@@ -109,7 +109,7 @@ pub fn canonical_encode(account: &Account) -> Vec<u8> {
         out.extend_from_slice(&filled.to_le_bytes()); // i128
     }
 
-    // L1 owner (presence flag + 32 bytes). v4 addition, after fills.
+    // L1 owner: 0x00 or 0x01 ‖ [u8; 32].
     match account.l1_owner() {
         Some(o) => {
             out.push(1);

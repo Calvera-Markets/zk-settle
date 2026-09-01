@@ -148,9 +148,9 @@ pub struct MockSettlementContract<V: Prover> {
     /// Set by the escape hatch: once frozen, no further batches commit/verify and
     /// users withdraw directly against the frozen root.
     frozen: bool,
-    /// `(owner, asset)` pairs already escaped, so a frozen-state withdrawal can be
-    /// claimed at most once.
-    escaped: BTreeSet<(L1Address, AssetId)>,
+    /// `(account, asset)` pairs already escaped, so a frozen-state withdrawal can
+    /// be claimed at most once per L2 account. Two accounts may share an L1 owner.
+    escaped: BTreeSet<(AccountId, AssetId)>,
     /// DA blobs of finalized batches, in order — the public record from which
     /// anyone reconstructs account state to exit via the escape hatch.
     da_blobs: Vec<DaBlob>,
@@ -484,10 +484,8 @@ impl<V: Prover> MockSettlementContract<V> {
     /// The caller supplies their claimed account contents (`proven`), the Merkle
     /// `siblings` for their leaf, and `signer_owner` (the Solana signer analogue).
     /// After the root check, the leaf owner must equal `signer_owner`
-    /// ([`SettleError::OwnerMismatch`] if missing or different). The escaped-set
-    /// key is the **leaf owner**, not a spoofable account id. Otherwise it
-    /// releases the proven balance of `asset` from the pool, once per
-    /// `(owner, asset)`.
+    /// ([`SettleError::OwnerMismatch`] if missing or different). Pays the proven
+    /// balance of `asset` from the pool, once per `(account, asset)`.
     #[allow(clippy::too_many_arguments)]
     pub fn escape_withdraw<H: Hasher>(
         &mut self,
@@ -517,12 +515,10 @@ impl<V: Prover> MockSettlementContract<V> {
         {
             return Err(SettleError::BadEscapeProof);
         }
-        // Authenticate against the leaf owner, not a spoofable account id.
         if proven.l1_owner() != Some(signer_owner) {
             return Err(SettleError::OwnerMismatch);
         }
-        let owner = signer_owner;
-        if self.escaped.contains(&(owner, asset)) {
+        if self.escaped.contains(&(account, asset)) {
             return Err(SettleError::AlreadyEscaped);
         }
         let amount = proven.balance(asset);
@@ -530,7 +526,7 @@ impl<V: Prover> MockSettlementContract<V> {
             return Err(SettleError::NothingToWithdraw);
         }
         self.release(asset, amount)?;
-        self.escaped.insert((owner, asset));
+        self.escaped.insert((account, asset));
         Ok(amount)
     }
 
@@ -1026,5 +1022,56 @@ mod tests {
             Amount(600)
         );
         assert_eq!(c.total_escrow(USDC), 0); // pool fully and exactly drained
+    }
+
+    #[test]
+    fn two_accounts_same_owner_can_both_escape() {
+        let other = AccountId(Uuid::from_u128(0xC));
+        let mut e = engine();
+        let mut c = contract();
+
+        let d1 = c
+            .deposit(buyer(), USDC, Amount(100), buyer_owner())
+            .unwrap();
+        let d2 = c.deposit(other, USDC, Amount(50), buyer_owner()).unwrap();
+        let o1 = e.step(vec![d1, d2]).unwrap();
+        c.commit(o1.proposal()).unwrap();
+        c.verify_next(&Sha256Hasher).unwrap();
+        c.freeze();
+
+        let accounts = crate::da::reconstruct(c.da_blobs());
+        let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
+        let buyer_acct = accounts.get(&buyer()).cloned().unwrap();
+        let other_acct = accounts.get(&other).cloned().unwrap();
+        let (bmask, bsibs) = tree.prove(buyer());
+        let (omask, osibs) = tree.prove(other);
+
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &buyer_acct,
+                bmask,
+                &bsibs,
+                USDC,
+                buyer_owner(),
+            )
+            .unwrap(),
+            Amount(100)
+        );
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                other,
+                &other_acct,
+                omask,
+                &osibs,
+                USDC,
+                buyer_owner(),
+            )
+            .unwrap(),
+            Amount(50)
+        );
+        assert_eq!(c.total_escrow(USDC), 0);
     }
 }

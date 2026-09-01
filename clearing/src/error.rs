@@ -36,7 +36,8 @@ pub enum SettlementError {
     #[error("account already has a different trading key registered")]
     KeyAlreadyRegistered,
 
-    /// A deposit's L1 owner does not match the owner already bound to the account.
+    /// L1 owner missing or does not match: a later deposit disagrees with the
+    /// bound owner, or a withdraw targets an account with no owner.
     #[error("L1 owner does not match the account's bound owner")]
     OwnerMismatch,
 

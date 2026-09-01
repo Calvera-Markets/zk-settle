@@ -297,8 +297,6 @@ impl State {
                     return Err(SettlementError::DuplicateDeposit(*nonce));
                 }
                 self.credit(*account, *asset, *amount)?;
-                // First deposit binds the L1 owner; later deposits must match
-                // (rolls back the credit on OwnerMismatch).
                 self.accounts
                     .entry(*account)
                     .or_default()
@@ -319,7 +317,16 @@ impl State {
                 account,
                 asset,
                 amount,
-            } => self.debit(*account, *asset, *amount),
+            } => {
+                if self
+                    .accounts
+                    .get(account)
+                    .is_some_and(|a| a.l1_owner().is_none())
+                {
+                    return Err(SettlementError::OwnerMismatch);
+                }
+                self.debit(*account, *asset, *amount)
+            }
             Tx::Trade { market, fill, auth } => {
                 // Authorization gate. Enforced whenever an operator key is
                 // registered — which, in production, is always: the contract sets
@@ -551,6 +558,22 @@ mod tests {
         assert_eq!(s.apply(&conflict), Err(SettlementError::OwnerMismatch));
         assert_eq!(s.balance(buyer(), USDC), Amount(100));
         assert_eq!(s.account(buyer()).unwrap().l1_owner(), Some(buyer_owner()));
+    }
+
+    #[test]
+    fn withdraw_without_owner_is_rejected() {
+        let mut funded = Account::new();
+        funded.credit(USDC, Amount(100)).unwrap();
+        let mut s = State::for_replay([(buyer(), funded)], [], None, 0);
+        assert_eq!(
+            s.apply(&Tx::Withdraw {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(10),
+            }),
+            Err(SettlementError::OwnerMismatch)
+        );
+        assert_eq!(s.balance(buyer(), USDC), Amount(100));
     }
 
     #[test]
