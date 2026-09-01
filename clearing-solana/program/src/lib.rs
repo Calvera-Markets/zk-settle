@@ -40,6 +40,28 @@ pub fn dispatch(
             let args = instruction::SettleArgs::unpack(rest)?;
             processor::settle::process(program_id, accounts, &args)
         }
+        instruction::CLAIM => {
+            let (args, siblings) = instruction::ClaimArgs::unpack(rest)?;
+            processor::claim::process(program_id, accounts, &args, siblings)
+        }
+        instruction::FREEZE => {
+            if !rest.is_empty() {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            processor::freeze::process(program_id, accounts)
+        }
+        instruction::ESCAPE_WITHDRAW => {
+            let args = instruction::EscapeWithdrawArgs::unpack(rest)?;
+            processor::escape::process(program_id, accounts, &args)
+        }
+        instruction::SET_ADMIN => {
+            let args = instruction::SetAdminArgs::unpack(rest)?;
+            processor::admin::set_admin(program_id, accounts, &args)
+        }
+        instruction::ROTATE_VK => {
+            let args = instruction::RotateVkArgs::unpack(rest)?;
+            processor::admin::rotate_vk(program_id, accounts, &args)
+        }
         instruction::VERIFY_PLAIN => verifier::process(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }

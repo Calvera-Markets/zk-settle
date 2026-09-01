@@ -323,3 +323,130 @@ mod tests {
         assert_eq!(unpacked, args);
     }
 }
+
+pub fn pack_freeze() -> [u8; 1] {
+    [FREEZE]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EscapeWithdrawArgs {
+    pub account_id: [u8; 16],
+    pub asset_id: u32,
+}
+
+impl EscapeWithdrawArgs {
+    pub const LEN: usize = 16 + 4;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut account_id = [0u8; 16];
+        account_id.copy_from_slice(&data[0..16]);
+        let mut asset_bytes = [0u8; 4];
+        asset_bytes.copy_from_slice(&data[16..20]);
+        Ok(Self {
+            account_id,
+            asset_id: u32::from_le_bytes(asset_bytes),
+        })
+    }
+
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = ESCAPE_WITHDRAW;
+        out[1..17].copy_from_slice(&self.account_id);
+        out[17..21].copy_from_slice(&self.asset_id.to_le_bytes());
+        out
+    }
+}
+
+/// `claim` (disc = 4). Variable length: header + n_siblings × 32.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClaimArgs {
+    pub batch_seq: u64,
+    pub index: u32,
+    pub asset_id: u32,
+    pub amount: u64,
+    pub n_siblings: u8,
+}
+
+impl ClaimArgs {
+    pub const HEADER_LEN: usize = 8 + 4 + 4 + 8 + 1;
+
+    pub fn unpack(data: &[u8]) -> Result<(Self, &[u8]), ProgramError> {
+        if data.len() < Self::HEADER_LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let n_siblings = data[24];
+        let sib_len = n_siblings as usize * 32;
+        if data.len() != Self::HEADER_LEN + sib_len {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut seq = [0u8; 8];
+        seq.copy_from_slice(&data[0..8]);
+        let mut idx = [0u8; 4];
+        idx.copy_from_slice(&data[8..12]);
+        let mut asset = [0u8; 4];
+        asset.copy_from_slice(&data[12..16]);
+        let mut amt = [0u8; 8];
+        amt.copy_from_slice(&data[16..24]);
+        Ok((
+            Self {
+                batch_seq: u64::from_le_bytes(seq),
+                index: u32::from_le_bytes(idx),
+                asset_id: u32::from_le_bytes(asset),
+                amount: u64::from_le_bytes(amt),
+                n_siblings,
+            },
+            &data[Self::HEADER_LEN..],
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetAdminArgs {
+    pub new_admin: [u8; 32],
+}
+
+impl SetAdminArgs {
+    pub const LEN: usize = 32;
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut new_admin = [0u8; 32];
+        new_admin.copy_from_slice(data);
+        Ok(Self { new_admin })
+    }
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 33];
+        out[0] = SET_ADMIN;
+        out[1..].copy_from_slice(&self.new_admin);
+        out
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RotateVkArgs {
+    pub guest_vk_hash: [u8; 32],
+    pub groth16_vk_hash_prefix: [u8; 4],
+    pub proof_version: u8,
+}
+
+impl RotateVkArgs {
+    pub const LEN: usize = 32 + 4 + 1;
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut guest_vk_hash = [0u8; 32];
+        guest_vk_hash.copy_from_slice(&data[0..32]);
+        let mut groth16_vk_hash_prefix = [0u8; 4];
+        groth16_vk_hash_prefix.copy_from_slice(&data[32..36]);
+        Ok(Self {
+            guest_vk_hash,
+            groth16_vk_hash_prefix,
+            proof_version: data[36],
+        })
+    }
+}
