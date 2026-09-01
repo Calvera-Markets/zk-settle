@@ -23,6 +23,9 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 const FIXTURE_SEED: u64 = 11;
+const FIXTURE_VK: &[u8] = include_bytes!("../../fixtures/circuits_vk.bin");
+const FIXTURE_PROOF: &[u8] = include_bytes!("../../fixtures/circuits_proof.bin");
+const FIXTURE_INPUTS: &[u8] = include_bytes!("../../fixtures/circuits_inputs.bin");
 
 struct Kat {
     vk_account: Vec<u8>,
@@ -66,9 +69,12 @@ fn prove_merkle_inclusion() -> Kat {
     }
 }
 
-fn kat() -> &'static Kat {
-    static KAT: OnceLock<Kat> = OnceLock::new();
-    KAT.get_or_init(prove_merkle_inclusion)
+fn packed_inputs(public_inputs: &[[u8; 32]]) -> Vec<u8> {
+    let mut inputs = Vec::with_capacity(public_inputs.len() * 32);
+    for pi in public_inputs {
+        inputs.extend_from_slice(pi);
+    }
+    inputs
 }
 
 fn write_fixtures(kat: &Kat) {
@@ -76,11 +82,42 @@ fn write_fixtures(kat: &Kat) {
     std::fs::create_dir_all(&dir).expect("fixtures dir");
     std::fs::write(dir.join("circuits_vk.bin"), &kat.vk_account).expect("vk fixture");
     std::fs::write(dir.join("circuits_proof.bin"), kat.proof).expect("proof fixture");
-    let mut inputs = Vec::new();
-    for pi in &kat.public_inputs {
-        inputs.extend_from_slice(pi);
+    std::fs::write(
+        dir.join("circuits_inputs.bin"),
+        packed_inputs(&kat.public_inputs),
+    )
+    .expect("inputs fixture");
+}
+
+fn lock_or_update_fixtures(kat: &Kat) {
+    if std::env::var("UPDATE_FIXTURES").as_deref() == Ok("1") {
+        write_fixtures(kat);
+        return;
     }
-    std::fs::write(dir.join("circuits_inputs.bin"), inputs).expect("inputs fixture");
+    assert_eq!(
+        kat.vk_account.as_slice(),
+        FIXTURE_VK,
+        "vk fixture drift; regen with UPDATE_FIXTURES=1"
+    );
+    assert_eq!(
+        kat.proof.as_slice(),
+        FIXTURE_PROOF,
+        "proof fixture drift; regen with UPDATE_FIXTURES=1"
+    );
+    assert_eq!(
+        packed_inputs(&kat.public_inputs).as_slice(),
+        FIXTURE_INPUTS,
+        "inputs fixture drift; regen with UPDATE_FIXTURES=1"
+    );
+}
+
+fn kat() -> &'static Kat {
+    static KAT: OnceLock<Kat> = OnceLock::new();
+    KAT.get_or_init(|| {
+        let kat = prove_merkle_inclusion();
+        lock_or_update_fixtures(&kat);
+        kat
+    })
 }
 
 fn setup_mollusk() -> Mollusk {
@@ -119,7 +156,6 @@ fn vk_account(data: Vec<u8>) -> Account {
 #[test]
 fn host_verifies_circuits_merkle_proof() {
     let kat = kat();
-    write_fixtures(kat);
     verifier::verify_plain(&kat.vk_account, &kat.proof, &kat.public_inputs)
         .expect("host groth16-solana verify");
 }
