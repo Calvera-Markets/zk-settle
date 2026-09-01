@@ -10,6 +10,8 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = []
 bpf-entrypoint = []
+# Host / test-SBF only. Production SBF deploys must not enable this.
+mock-proof = []
 
 [dependencies]
 pinocchio = { workspace = true, features = ["cpi"] }

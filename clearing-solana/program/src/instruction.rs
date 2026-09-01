@@ -174,3 +174,152 @@ impl DepositIxBytes {
         }
     }
 }
+
+/// SP1 wrap proof length (`SHA256(gnark_vk)[..4] ‖ A ‖ B ‖ C`). v1 mock-proof may be zeros.
+pub const SETTLE_PROOF_LEN: usize = 260;
+pub const PUBLIC_VALUES_LEN: usize = 144;
+pub const DA_HASH_LEN: usize = 32;
+
+/// Packed guest public values (144 bytes, little-endian u64s).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicValues {
+    pub prev_root: [u8; 32],
+    pub new_root: [u8; 32],
+    pub withdrawals_root: [u8; 32],
+    pub matcher_key: [u8; 32],
+    pub batch_seq: u64,
+    pub expiry_height: u64,
+}
+
+impl PublicValues {
+    pub const LEN: usize = PUBLIC_VALUES_LEN;
+
+    pub fn unpack(data: &[u8; Self::LEN]) -> Self {
+        let mut prev_root = [0u8; 32];
+        prev_root.copy_from_slice(&data[0..32]);
+        let mut new_root = [0u8; 32];
+        new_root.copy_from_slice(&data[32..64]);
+        let mut withdrawals_root = [0u8; 32];
+        withdrawals_root.copy_from_slice(&data[64..96]);
+        let mut matcher_key = [0u8; 32];
+        matcher_key.copy_from_slice(&data[96..128]);
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&data[128..136]);
+        let mut expiry_bytes = [0u8; 8];
+        expiry_bytes.copy_from_slice(&data[136..144]);
+        Self {
+            prev_root,
+            new_root,
+            withdrawals_root,
+            matcher_key,
+            batch_seq: u64::from_le_bytes(seq_bytes),
+            expiry_height: u64::from_le_bytes(expiry_bytes),
+        }
+    }
+
+    pub fn pack(&self) -> [u8; Self::LEN] {
+        pack_public_values(
+            &self.prev_root,
+            &self.new_root,
+            &self.withdrawals_root,
+            &self.matcher_key,
+            self.batch_seq,
+            self.expiry_height,
+        )
+    }
+}
+
+pub fn pack_public_values(
+    prev_root: &[u8; 32],
+    new_root: &[u8; 32],
+    withdrawals_root: &[u8; 32],
+    matcher_key: &[u8; 32],
+    batch_seq: u64,
+    expiry_height: u64,
+) -> [u8; PUBLIC_VALUES_LEN] {
+    let mut pv = [0u8; PUBLIC_VALUES_LEN];
+    pv[0..32].copy_from_slice(prev_root);
+    pv[32..64].copy_from_slice(new_root);
+    pv[64..96].copy_from_slice(withdrawals_root);
+    pv[96..128].copy_from_slice(matcher_key);
+    pv[128..136].copy_from_slice(&batch_seq.to_le_bytes());
+    pv[136..144].copy_from_slice(&expiry_height.to_le_bytes());
+    pv
+}
+
+/// `settle` (disc = 3) instruction data after the discriminator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SettleArgs {
+    pub proof: [u8; SETTLE_PROOF_LEN],
+    pub public_values: [u8; PUBLIC_VALUES_LEN],
+    pub da_hash: [u8; DA_HASH_LEN],
+}
+
+impl SettleArgs {
+    pub const LEN: usize = SETTLE_PROOF_LEN + PUBLIC_VALUES_LEN + DA_HASH_LEN;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut proof = [0u8; SETTLE_PROOF_LEN];
+        proof.copy_from_slice(&data[0..SETTLE_PROOF_LEN]);
+        let mut public_values = [0u8; PUBLIC_VALUES_LEN];
+        public_values
+            .copy_from_slice(&data[SETTLE_PROOF_LEN..SETTLE_PROOF_LEN + PUBLIC_VALUES_LEN]);
+        let mut da_hash = [0u8; DA_HASH_LEN];
+        da_hash.copy_from_slice(&data[SETTLE_PROOF_LEN + PUBLIC_VALUES_LEN..]);
+        Ok(Self {
+            proof,
+            public_values,
+            da_hash,
+        })
+    }
+
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = SETTLE;
+        out[1..1 + SETTLE_PROOF_LEN].copy_from_slice(&self.proof);
+        out[1 + SETTLE_PROOF_LEN..1 + SETTLE_PROOF_LEN + PUBLIC_VALUES_LEN]
+            .copy_from_slice(&self.public_values);
+        out[1 + SETTLE_PROOF_LEN + PUBLIC_VALUES_LEN..].copy_from_slice(&self.da_hash);
+        out
+    }
+
+    pub fn public_values(&self) -> PublicValues {
+        PublicValues::unpack(&self.public_values)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_values_roundtrip_offsets() {
+        let packed = pack_public_values(&[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 7, 0);
+        assert_eq!(packed.len(), 144);
+        let pv = PublicValues::unpack(&packed);
+        assert_eq!(pv.prev_root, [1u8; 32]);
+        assert_eq!(pv.new_root, [2u8; 32]);
+        assert_eq!(pv.withdrawals_root, [3u8; 32]);
+        assert_eq!(pv.matcher_key, [4u8; 32]);
+        assert_eq!(pv.batch_seq, 7);
+        assert_eq!(pv.expiry_height, 0);
+        assert_eq!(pv.pack(), packed);
+    }
+
+    #[test]
+    fn settle_args_pack_unpack() {
+        let args = SettleArgs {
+            proof: [0xABu8; SETTLE_PROOF_LEN],
+            public_values: pack_public_values(&[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 0, 0),
+            da_hash: [0xCDu8; 32],
+        };
+        let packed = args.pack();
+        assert_eq!(packed[0], SETTLE);
+        assert_eq!(packed.len(), 1 + SettleArgs::LEN);
+        let unpacked = SettleArgs::unpack(&packed[1..]).unwrap();
+        assert_eq!(unpacked, args);
+    }
+}

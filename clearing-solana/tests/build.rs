@@ -27,7 +27,7 @@ fn main() {
         .arg("--manifest-path")
         .arg(program.join("Cargo.toml"))
         .arg("--features")
-        .arg("bpf-entrypoint")
+        .arg("bpf-entrypoint,mock-proof")
         .arg("--sbf-out-dir")
         .arg(&sbf_out)
         .env("CARGO_TARGET_DIR", &sbf_target)

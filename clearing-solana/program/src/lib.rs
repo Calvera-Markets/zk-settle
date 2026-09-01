@@ -36,6 +36,10 @@ pub fn dispatch(
             let args = instruction::DepositArgs::unpack(rest)?;
             processor::deposit::process(program_id, accounts, &args)
         }
+        instruction::SETTLE => {
+            let args = instruction::SettleArgs::unpack(rest)?;
+            processor::settle::process(program_id, accounts, &args)
+        }
         instruction::VERIFY_PLAIN => verifier::process(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
