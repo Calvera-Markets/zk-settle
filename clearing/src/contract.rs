@@ -39,7 +39,7 @@ use crate::commitment::{
     withdrawals_root,
 };
 use crate::da::DaBlob;
-use crate::id::{AccountId, AssetId, Amount, L1Address};
+use crate::id::{AccountId, Amount, AssetId, L1Address};
 use crate::prover::{ProveError, Prover, Witness};
 use crate::state::State;
 use crate::tx::{OnChainMessage, Tx};
@@ -121,6 +121,9 @@ pub enum SettleError {
     /// This withdrawal was already claimed (nullifier present).
     #[error("withdrawal already claimed")]
     AlreadyClaimed,
+    /// The escape caller is not the leaf's L1 owner (or the leaf has no owner).
+    #[error("caller is not the proven leaf owner")]
+    OwnerMismatch,
 }
 
 /// The mock settlement contract: escrow custody + proof-gated finalization.
@@ -145,9 +148,9 @@ pub struct MockSettlementContract<V: Prover> {
     /// Set by the escape hatch: once frozen, no further batches commit/verify and
     /// users withdraw directly against the frozen root.
     frozen: bool,
-    /// `(owner, asset)` pairs already escaped, so a frozen-state withdrawal can be
-    /// claimed at most once.
-    escaped: BTreeSet<(L1Address, AssetId)>,
+    /// `(account, asset)` pairs already escaped, so a frozen-state withdrawal can
+    /// be claimed at most once per L2 account. Two accounts may share an L1 owner.
+    escaped: BTreeSet<(AccountId, AssetId)>,
     /// DA blobs of finalized batches, in order — the public record from which
     /// anyone reconstructs account state to exit via the escape hatch.
     da_blobs: Vec<DaBlob>,
@@ -207,11 +210,12 @@ impl<V: Prover> MockSettlementContract<V> {
 
     // --- custody ---------------------------------------------------------
 
-    /// Originate a deposit: escrow the funds (under the account's L1 owner) and
-    /// return the contract-issued [`Tx::Deposit`] — with a unique nonce — that
-    /// the engine must include to credit the L2 balance. The L2 credit is final
-    /// only once the batch carrying this tx verifies; until then escrow leads the
-    /// proven L2 state (the documented in-flight gap).
+    /// Originate a deposit: escrow the funds (under `owner`) and return the
+    /// contract-issued [`Tx::Deposit`] — with a unique nonce and that owner —
+    /// that the engine must include to credit the L2 balance. The L2 credit is
+    /// final only once the batch carrying this tx verifies; until then escrow
+    /// leads the proven L2 state (the documented in-flight gap). `trading_key`
+    /// on the issued tx is `None`.
     ///
     /// This is the deposit analogue of the proof-authorized withdrawal: the
     /// contract is the sole nonce issuer, so every credited deposit is backed by
@@ -223,6 +227,7 @@ impl<V: Prover> MockSettlementContract<V> {
         account: AccountId,
         asset: AssetId,
         amount: Amount,
+        owner: L1Address,
     ) -> Result<Tx, SettleError> {
         if self.frozen {
             return Err(SettleError::Frozen);
@@ -243,6 +248,7 @@ impl<V: Prover> MockSettlementContract<V> {
             asset,
             amount,
             nonce,
+            owner,
             // The mock contract's deposit path does not register a trading key
             // yet; key registration through the contract API is Phase 2/4.
             trading_key: None,
@@ -334,7 +340,10 @@ impl<V: Prover> MockSettlementContract<V> {
         if self.frozen {
             return Err(SettleError::Frozen);
         }
-        let batch = self.pending.pop_front().ok_or(SettleError::NothingToVerify)?;
+        let batch = self
+            .pending
+            .pop_front()
+            .ok_or(SettleError::NothingToVerify)?;
         if batch.prev_root() != self.root {
             return Err(SettleError::RootMismatch {
                 expected: self.root,
@@ -351,7 +360,13 @@ impl<V: Prover> MockSettlementContract<V> {
             .witness
             .messages
             .iter()
-            .map(|OnChainMessage::Withdraw { owner, asset, amount }| (*owner, *asset, *amount))
+            .map(
+                |OnChainMessage::Withdraw {
+                     owner,
+                     asset,
+                     amount,
+                 }| (*owner, *asset, *amount),
+            )
             .collect();
         let w_root = withdrawals_root(hasher, batch_seq, &entries);
 
@@ -363,7 +378,9 @@ impl<V: Prover> MockSettlementContract<V> {
                 .pending_withdrawals
                 .entry(*asset)
                 .or_insert(Amount::ZERO);
-            *acc = acc.checked_add(*amount).map_err(|_| SettleError::Overflow)?;
+            *acc = acc
+                .checked_add(*amount)
+                .map_err(|_| SettleError::Overflow)?;
         }
         self.da_blobs.push(batch.da);
         Ok(self.root)
@@ -414,8 +431,14 @@ impl<V: Prover> MockSettlementContract<V> {
         ) {
             return Err(SettleError::BadClaimProof);
         }
-        let nullifier =
-            crate::commitment::withdrawal_leaf(hasher, batch_seq as u64, index, owner, asset, amount);
+        let nullifier = crate::commitment::withdrawal_leaf(
+            hasher,
+            batch_seq as u64,
+            index,
+            owner,
+            asset,
+            amount,
+        );
         if self.claimed.contains(&nullifier) {
             return Err(SettleError::AlreadyClaimed);
         }
@@ -458,17 +481,12 @@ impl<V: Prover> MockSettlementContract<V> {
     /// contract**, with no operator, by proving their account state against the
     /// frozen root.
     ///
-    /// The caller supplies their claimed account contents (`proven`) and the
-    /// Merkle `siblings` for their leaf. The contract recomputes the leaf hash
-    /// and folds it up the path: if it does not reproduce the committed `root`,
-    /// the claim is rejected ([`SettleError::BadEscapeProof`]) — so an **unlawful
-    /// withdrawal (forged or inflated balance) fails right here, at the
-    /// contract**. Otherwise it releases the proven balance of `asset` from the
-    /// pool, once per `(owner, asset)`.
-    ///
-    /// This is the same Merkle-inclusion check the witness uses; with a real
-    /// prover it is identical in spirit to the normal claim, just against a
-    /// frozen root instead of a live one.
+    /// The caller supplies their claimed account contents (`proven`), the Merkle
+    /// `siblings` for their leaf, and `signer_owner` (the Solana signer analogue).
+    /// After the root check, the leaf owner must equal `signer_owner`
+    /// ([`SettleError::OwnerMismatch`] if missing or different). Pays the proven
+    /// balance of `asset` from the pool, once per `(account, asset)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn escape_withdraw<H: Hasher>(
         &mut self,
         hasher: &H,
@@ -477,13 +495,10 @@ impl<V: Prover> MockSettlementContract<V> {
         sibling_mask: u128,
         siblings: &[Hash],
         asset: AssetId,
+        signer_owner: L1Address,
     ) -> Result<Amount, SettleError> {
         if !self.frozen {
             return Err(SettleError::NotFrozen);
-        }
-        let owner = account.l1_owner();
-        if self.escaped.contains(&(owner, asset)) {
-            return Err(SettleError::AlreadyEscaped);
         }
         // Bind the claim to the committed state: the claimed contents must hash,
         // along the supplied (sparse) path, back to the frozen root.
@@ -500,12 +515,18 @@ impl<V: Prover> MockSettlementContract<V> {
         {
             return Err(SettleError::BadEscapeProof);
         }
+        if proven.l1_owner() != Some(signer_owner) {
+            return Err(SettleError::OwnerMismatch);
+        }
+        if self.escaped.contains(&(account, asset)) {
+            return Err(SettleError::AlreadyEscaped);
+        }
         let amount = proven.balance(asset);
         if amount.is_zero() {
             return Err(SettleError::NothingToWithdraw);
         }
         self.release(asset, amount)?;
-        self.escaped.insert((owner, asset));
+        self.escaped.insert((account, asset));
         Ok(amount)
     }
 
@@ -532,7 +553,7 @@ mod tests {
     use crate::account::Account;
     use crate::commitment::StateTree;
     use crate::commitment::hash_plain::Sha256Hasher;
-    use crate::id::{AccountId, InstrumentId, MarketId};
+    use crate::id::{AccountId, InstrumentId, L1Address, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;
     use crate::{Engine, ExecutingProver, ReplayProver, Tx};
@@ -546,6 +567,12 @@ mod tests {
     }
     fn seller() -> AccountId {
         AccountId(Uuid::from_u128(0x5))
+    }
+    fn buyer_owner() -> L1Address {
+        L1Address([1u8; 32])
+    }
+    fn seller_owner() -> L1Address {
+        L1Address([2u8; 32])
     }
     fn market() -> MarketId {
         MarketId(Uuid::from_u128(0xA1))
@@ -583,6 +610,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: buyer_owner(),
                 trading_key: None,
             }])
             .unwrap();
@@ -609,6 +637,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: buyer_owner(),
                 trading_key: None,
             }])
             .unwrap();
@@ -634,6 +663,7 @@ mod tests {
                     asset: USDC,
                     amount: Amount(1000),
                     nonce: 0,
+                    owner: buyer_owner(),
                     trading_key: None,
                 },
                 Tx::Deposit {
@@ -641,6 +671,7 @@ mod tests {
                     asset: BTC,
                     amount: Amount(5),
                     nonce: 1,
+                    owner: seller_owner(),
                     trading_key: None,
                 },
             ])
@@ -675,6 +706,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: buyer_owner(),
                 trading_key: None,
             }])
             .unwrap();
@@ -701,7 +733,9 @@ mod tests {
         let mut c = contract();
 
         // Deposit (batch 0): the contract escrows and issues the deposit tx.
-        let dep = c.deposit(buyer(), USDC, Amount(1000)).unwrap();
+        let dep = c
+            .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+            .unwrap();
         let o1 = e.step(vec![dep]).unwrap();
         c.commit(o1.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
@@ -725,7 +759,7 @@ mod tests {
         assert!(c.is_solvent(e.state(), &[USDC, BTC])); // 1000 == 600 L2 + 400 pending
 
         // The user claims asynchronously against batch 1's withdrawals root.
-        let owner = buyer().l1_owner();
+        let owner = buyer_owner();
         let entries = [(owner, USDC, Amount(400))];
         let siblings = withdrawal_proof(&Sha256Hasher, 1, &entries, 0);
         c.claim(&Sha256Hasher, 1, 0, owner, USDC, Amount(400), &siblings)
@@ -748,17 +782,23 @@ mod tests {
         let mut e = engine();
         let mut c = contract();
 
-        let dep = c.deposit(buyer(), USDC, Amount(1000)).unwrap();
+        let dep = c
+            .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+            .unwrap();
         let o1 = e.step(vec![dep]).unwrap();
         c.commit(o1.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
         let o2 = e
-            .step(vec![Tx::Withdraw { account: buyer(), asset: USDC, amount: Amount(400) }])
+            .step(vec![Tx::Withdraw {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(400),
+            }])
             .unwrap();
         c.commit(o2.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
 
-        let owner = buyer().l1_owner();
+        let owner = buyer_owner();
         let entries = [(owner, USDC, Amount(400))];
         let siblings = withdrawal_proof(&Sha256Hasher, 1, &entries, 0);
 
@@ -781,7 +821,9 @@ mod tests {
         let mut e = engine();
         let mut c = contract();
 
-        let dep = c.deposit(buyer(), USDC, Amount(1000)).unwrap();
+        let dep = c
+            .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+            .unwrap();
         let o1 = e.step(vec![dep]).unwrap();
         c.commit(o1.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
@@ -815,7 +857,9 @@ mod tests {
         // the batch is rejected — at the contract.
         let mut e = engine();
         let mut c = contract();
-        let dep = c.deposit(buyer(), USDC, Amount(1000)).unwrap();
+        let dep = c
+            .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+            .unwrap();
         let o1 = e.step(vec![dep]).unwrap();
         c.commit(o1.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
@@ -830,17 +874,21 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1),
                 nonce: 99,
+                owner: seller_owner(),
                 trading_key: None,
             }])
             .unwrap();
         o2.witness.messages.push(OnChainMessage::Withdraw {
-            owner: buyer().l1_owner(),
+            owner: buyer_owner(),
             asset: USDC,
             amount: Amount(999),
         });
 
         c.commit(o2.proposal()).unwrap();
-        assert!(matches!(c.verify_next(&Sha256Hasher), Err(SettleError::InvalidProof(_))));
+        assert!(matches!(
+            c.verify_next(&Sha256Hasher),
+            Err(SettleError::InvalidProof(_))
+        ));
         // Nothing released; the forged withdrawal never finalized.
         assert_eq!(c.total_escrow(USDC), 1000);
     }
@@ -851,8 +899,10 @@ mod tests {
         let mut c = contract();
 
         // Fund + trade: buyer ends with 600 USDC / 2 BTC, seller 400 USDC / 3 BTC.
-        let d1 = c.deposit(buyer(), USDC, Amount(1000)).unwrap();
-        let d2 = c.deposit(seller(), BTC, Amount(5)).unwrap();
+        let d1 = c
+            .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+            .unwrap();
+        let d2 = c.deposit(seller(), BTC, Amount(5), seller_owner()).unwrap();
         let o1 = e.step(vec![d1, d2]).unwrap();
         c.commit(o1.proposal()).unwrap();
         c.verify_next(&Sha256Hasher).unwrap();
@@ -882,21 +932,58 @@ mod tests {
         // This is the real escape path: no operator, only on-chain data.
         let accounts = crate::da::reconstruct(c.da_blobs());
         let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
-        assert_eq!(tree.root(), c.root(), "DA blobs reconstruct the committed root");
+        assert_eq!(
+            tree.root(),
+            c.root(),
+            "DA blobs reconstruct the committed root"
+        );
+
+        // Theft: DA-reconstructed leaf for account B, caller A, valid path.
+        // Merkle succeeds; owner check rejects. Escrow unchanged.
+        let seller_acct = accounts.get(&seller()).cloned().unwrap();
+        let (mask, sibs) = tree.prove(seller());
+        let escrow_before = c.total_escrow(USDC);
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                seller(),
+                &seller_acct,
+                mask,
+                &sibs,
+                USDC,
+                buyer_owner(),
+            ),
+            Err(SettleError::OwnerMismatch)
+        );
+        assert_eq!(c.total_escrow(USDC), escrow_before);
 
         // Seller self-withdraws their 400 USDC — note they never *deposited* USDC
         // (it came from the trade): it's paid from the asset pool.
-        let seller_acct = accounts.get(&seller()).cloned().unwrap();
-        let (mask, sibs) = tree.prove(seller());
         let got = c
-            .escape_withdraw(&Sha256Hasher, seller(), &seller_acct, mask, &sibs, USDC)
+            .escape_withdraw(
+                &Sha256Hasher,
+                seller(),
+                &seller_acct,
+                mask,
+                &sibs,
+                USDC,
+                seller_owner(),
+            )
             .unwrap();
         assert_eq!(got, Amount(400));
         assert_eq!(c.total_escrow(USDC), 600);
 
         // Double-escape of the same asset is rejected.
         assert_eq!(
-            c.escape_withdraw(&Sha256Hasher, seller(), &seller_acct, mask, &sibs, USDC),
+            c.escape_withdraw(
+                &Sha256Hasher,
+                seller(),
+                &seller_acct,
+                mask,
+                &sibs,
+                USDC,
+                seller_owner(),
+            ),
             Err(SettleError::AlreadyEscaped)
         );
 
@@ -907,17 +994,84 @@ mod tests {
         forged.credit(USDC, Amount(5000)).unwrap();
         let (bmask, bsibs) = tree.prove(buyer());
         assert_eq!(
-            c.escape_withdraw(&Sha256Hasher, buyer(), &forged, bmask, &bsibs, USDC),
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &forged,
+                bmask,
+                &bsibs,
+                USDC,
+                buyer_owner(),
+            ),
             Err(SettleError::BadEscapeProof)
         );
 
         // The buyer can still withdraw their *real* proven 600 (also from DA).
         let buyer_acct = accounts.get(&buyer()).cloned().unwrap();
         assert_eq!(
-            c.escape_withdraw(&Sha256Hasher, buyer(), &buyer_acct, bmask, &bsibs, USDC)
-                .unwrap(),
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &buyer_acct,
+                bmask,
+                &bsibs,
+                USDC,
+                buyer_owner(),
+            )
+            .unwrap(),
             Amount(600)
         );
         assert_eq!(c.total_escrow(USDC), 0); // pool fully and exactly drained
+    }
+
+    #[test]
+    fn two_accounts_same_owner_can_both_escape() {
+        let other = AccountId(Uuid::from_u128(0xC));
+        let mut e = engine();
+        let mut c = contract();
+
+        let d1 = c
+            .deposit(buyer(), USDC, Amount(100), buyer_owner())
+            .unwrap();
+        let d2 = c.deposit(other, USDC, Amount(50), buyer_owner()).unwrap();
+        let o1 = e.step(vec![d1, d2]).unwrap();
+        c.commit(o1.proposal()).unwrap();
+        c.verify_next(&Sha256Hasher).unwrap();
+        c.freeze();
+
+        let accounts = crate::da::reconstruct(c.da_blobs());
+        let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
+        let buyer_acct = accounts.get(&buyer()).cloned().unwrap();
+        let other_acct = accounts.get(&other).cloned().unwrap();
+        let (bmask, bsibs) = tree.prove(buyer());
+        let (omask, osibs) = tree.prove(other);
+
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &buyer_acct,
+                bmask,
+                &bsibs,
+                USDC,
+                buyer_owner(),
+            )
+            .unwrap(),
+            Amount(100)
+        );
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                other,
+                &other_acct,
+                omask,
+                &osibs,
+                USDC,
+                buyer_owner(),
+            )
+            .unwrap(),
+            Amount(50)
+        );
+        assert_eq!(c.total_escrow(USDC), 0);
     }
 }

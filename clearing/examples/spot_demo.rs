@@ -7,7 +7,7 @@
 //! tailer's loop in miniature.
 
 use clearing::commitment::hash_plain::Sha256Hasher;
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{Engine, Hash, ReplayProver, SyntheticSource, Tx};
@@ -40,15 +40,38 @@ fn main() {
 
     let mut source = SyntheticSource::new(vec![
         vec![
-            Tx::Deposit { account: buyer, asset: USDC, amount: Amount(1000), nonce: 0, trading_key: None },
-            Tx::Deposit { account: seller, asset: BTC, amount: Amount(5), nonce: 1, trading_key: None },
+            Tx::Deposit {
+                account: buyer,
+                asset: USDC,
+                amount: Amount(1000),
+                nonce: 0,
+                owner: L1Address([1u8; 32]),
+                trading_key: None,
+            },
+            Tx::Deposit {
+                account: seller,
+                asset: BTC,
+                amount: Amount(5),
+                nonce: 1,
+                owner: L1Address([2u8; 32]),
+                trading_key: None,
+            },
         ],
         vec![Tx::Trade {
             market,
-            fill: Fill { buyer, seller, base_amount: Amount(2), quote_amount: Amount(400) },
+            fill: Fill {
+                buyer,
+                seller,
+                base_amount: Amount(2),
+                quote_amount: Amount(400),
+            },
             auth: None,
         }],
-        vec![Tx::Withdraw { account: buyer, asset: USDC, amount: Amount(100) }],
+        vec![Tx::Withdraw {
+            account: buyer,
+            asset: USDC,
+            amount: Amount(100),
+        }],
     ]);
 
     println!("empty root: {}…", short(&engine.root()));

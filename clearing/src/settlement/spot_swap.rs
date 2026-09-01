@@ -78,7 +78,11 @@ mod tests {
                 .unwrap_or(Amount::ZERO)
         }
         fn fund(&mut self, a: AccountId, asset: AssetId, amount: Amount) {
-            self.accounts.entry(a).or_default().credit(asset, amount).unwrap();
+            self.accounts
+                .entry(a)
+                .or_default()
+                .credit(asset, amount)
+                .unwrap();
         }
     }
     impl Ledger for TestLedger {
@@ -88,7 +92,10 @@ mod tests {
             asset: AssetId,
             amount: Amount,
         ) -> Result<(), SettlementError> {
-            self.accounts.entry(account).or_default().credit(asset, amount)
+            self.accounts
+                .entry(account)
+                .or_default()
+                .credit(asset, amount)
         }
         fn debit(
             &mut self,
@@ -140,7 +147,12 @@ mod tests {
         l.fund(seller(), BTC, Amount(5));
 
         SpotSwap
-            .apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(5, 1000))
+            .apply_fill(
+                &btc_usdc(),
+                &MarketGlobals::default(),
+                &mut l,
+                &fill(5, 1000),
+            )
             .unwrap();
 
         // buyer: -1000 USDC, +5 BTC ; seller: +1000 USDC, -5 BTC
@@ -159,7 +171,12 @@ mod tests {
         let btc_before = l.bal(buyer(), BTC).0 + l.bal(seller(), BTC).0;
 
         SpotSwap
-            .apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(3, 600))
+            .apply_fill(
+                &btc_usdc(),
+                &MarketGlobals::default(),
+                &mut l,
+                &fill(3, 600),
+            )
             .unwrap();
 
         let usdc_after = l.bal(buyer(), USDC).0 + l.bal(seller(), USDC).0;
@@ -175,7 +192,12 @@ mod tests {
         l.fund(seller(), BTC, Amount(5));
 
         let err = SpotSwap
-            .apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(5, 1000))
+            .apply_fill(
+                &btc_usdc(),
+                &MarketGlobals::default(),
+                &mut l,
+                &fill(5, 1000),
+            )
             .unwrap_err();
         assert_eq!(
             err,
@@ -200,7 +222,12 @@ mod tests {
         l.fund(buyer(), USDC, Amount(1000));
         l.fund(seller(), BTC, Amount(5));
         assert_eq!(
-            SpotSwap.apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(0, 100)),
+            SpotSwap.apply_fill(
+                &btc_usdc(),
+                &MarketGlobals::default(),
+                &mut l,
+                &fill(0, 100)
+            ),
             Err(SettlementError::NonPositiveQuantity)
         );
     }

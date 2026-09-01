@@ -27,6 +27,7 @@ pub mod hash_poseidon2;
 use std::collections::BTreeMap;
 
 use crate::account::Account;
+use crate::auth::Ed25519PubKey;
 use crate::id::{AccountId, Amount, AssetId, L1Address};
 use crate::state::{State, StateDelta};
 
@@ -40,8 +41,8 @@ const DEPTH: u8 = 128;
 /// Canonical account-leaf encoding version. Bump on any layout change so a
 /// stale encoding can never silently produce a matching root.
 /// v2 appends the account's registered trading key; v3 appends its per-order
-/// fill accounting (see `canonical_encode`).
-const LEAF_VERSION: u8 = 3;
+/// fill accounting; v4 appends the L1 owner (see `canonical_encode`).
+const LEAF_VERSION: u8 = 4;
 
 /// Canonical order-encoding version (for [`order_id`]).
 const ORDER_VERSION: u8 = 1;
@@ -49,8 +50,9 @@ const ORDER_VERSION: u8 = 1;
 /// Version byte for the matcher-signed fill message (see [`encode_matcher_msg`]).
 const MATCHER_MSG_VERSION: u8 = 1;
 
-/// Version byte for a withdrawal leaf (see [`encode_withdrawal`]).
-const WITHDRAWAL_VERSION: u8 = 1;
+/// Version byte for a withdrawal leaf (see [`encode_withdrawal`]). v2 uses a
+/// 32-byte L1 owner (Solana pubkey) in a fixed 65-byte encoding.
+const WITHDRAWAL_VERSION: u8 = 2;
 
 /// The commitment hash function. Leaf and node hashing are separate (and the
 /// impl domain-separates them) so a leaf can never be reinterpreted as a node.
@@ -106,6 +108,15 @@ pub fn canonical_encode(account: &Account) -> Vec<u8> {
     for (id, filled) in fills {
         out.extend_from_slice(id); // 32-byte order id
         out.extend_from_slice(&filled.to_le_bytes()); // i128
+    }
+
+    // L1 owner: 0x00 or 0x01 ‖ [u8; 32].
+    match account.l1_owner() {
+        Some(o) => {
+            out.push(1);
+            out.extend_from_slice(&o.0);
+        }
+        None => out.push(0),
     }
     out
 }
@@ -168,7 +179,9 @@ pub fn encode_matcher_msg(
 // globally unique — that uniqueness is what the claim nullifier keys on, and it
 // stops two identical `(owner, asset, amount)` payouts from colliding.
 
-/// Canonical, versioned encoding of one withdrawal leaf.
+/// Canonical, versioned encoding of one withdrawal leaf. Fixed width **65
+/// bytes**: version `0x02`, `batch_seq` u64 LE, `index` u32 LE, owner 32,
+/// asset u32 LE, amount i128 LE.
 pub fn encode_withdrawal(
     batch_seq: u64,
     index: u32,
@@ -176,13 +189,14 @@ pub fn encode_withdrawal(
     asset: AssetId,
     amount: Amount,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 8 + 4 + 16 + 4 + 16);
+    let mut out = Vec::with_capacity(65);
     out.push(WITHDRAWAL_VERSION);
     out.extend_from_slice(&batch_seq.to_le_bytes());
     out.extend_from_slice(&index.to_le_bytes());
-    out.extend_from_slice(&owner.0.as_u128().to_le_bytes());
+    out.extend_from_slice(&owner.0);
     out.extend_from_slice(&asset.0.to_le_bytes());
     out.extend_from_slice(&amount.to_le_bytes());
+    debug_assert_eq!(out.len(), 65);
     out
 }
 
@@ -232,6 +246,31 @@ pub fn withdrawals_root<H: Hasher>(
             .collect();
     }
     level[0]
+}
+
+/// Packed zkVM public-values width: one `commit_slice` of 144 bytes.
+pub const PUBLIC_VALUES_LEN: usize = 144;
+
+/// Pack the guest public values as one 144-byte slice (little-endian u64s).
+/// Parameter order matches the byte layout:
+///   0..32 prev_root | 32..64 new_root | 64..96 withdrawals_root
+///   96..128 matcher_key | 128..136 batch_seq | 136..144 expiry_height
+pub fn pack_public_values(
+    prev_root: &Hash,
+    new_root: &Hash,
+    w_root: &Hash,
+    matcher_key: &Ed25519PubKey,
+    batch_seq: u64,
+    expiry_height: u64,
+) -> [u8; PUBLIC_VALUES_LEN] {
+    let mut pv = [0u8; PUBLIC_VALUES_LEN];
+    pv[0..32].copy_from_slice(prev_root);
+    pv[32..64].copy_from_slice(new_root);
+    pv[64..96].copy_from_slice(w_root);
+    pv[96..128].copy_from_slice(&matcher_key.0);
+    pv[128..136].copy_from_slice(&batch_seq.to_le_bytes());
+    pv[136..144].copy_from_slice(&expiry_height.to_le_bytes());
+    pv
 }
 
 /// The inclusion path (siblings, leaf→root) for the withdrawal at `index`.
@@ -564,10 +603,9 @@ impl<H: Hasher> StateTree<H> {
 mod tests {
     use super::hash_plain::Sha256Hasher;
     use super::*;
-    use crate::id::{Amount, AssetId, MarketId};
+    use crate::id::{Amount, AssetId, InstrumentId, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;
-    use crate::id::InstrumentId;
     use crate::tx::Tx;
     use uuid::Uuid;
 
@@ -576,6 +614,9 @@ mod tests {
 
     fn acct(i: u128) -> AccountId {
         AccountId(Uuid::from_u128(i))
+    }
+    fn owner(n: u8) -> L1Address {
+        L1Address([n; 32])
     }
     fn market() -> MarketId {
         MarketId(Uuid::from_u128(0xA1))
@@ -615,6 +656,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(100),
                 nonce: 0,
+                owner: owner(7),
                 trading_key: None,
             })
             .unwrap();
@@ -629,7 +671,11 @@ mod tests {
             })
             .unwrap();
         t.apply_delta(&s, &d);
-        assert_eq!(t.root(), empty, "removing all holdings returns to empty root");
+        assert_eq!(
+            t.root(),
+            empty,
+            "removing all holdings returns to empty root"
+        );
     }
 
     #[test]
@@ -642,6 +688,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(100),
                 nonce: 0,
+                owner: owner(7),
                 trading_key: None,
             })
             .unwrap();
@@ -654,6 +701,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1),
                 nonce: 1,
+                owner: owner(7),
                 trading_key: None,
             })
             .unwrap();
@@ -692,6 +740,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(1000),
                 nonce: 0,
+                owner: owner(1),
                 trading_key: None,
             },
             Tx::Deposit {
@@ -699,6 +748,7 @@ mod tests {
                 asset: BTC,
                 amount: Amount(5),
                 nonce: 1,
+                owner: owner(2),
                 trading_key: None,
             },
             Tx::Trade {
@@ -737,6 +787,65 @@ mod tests {
     }
 
     #[test]
+    fn binding_an_owner_changes_the_leaf() {
+        use crate::account::Account;
+        let mut a = Account::new();
+        a.credit(USDC, Amount(1000)).unwrap();
+        let encoded = canonical_encode(&a);
+        assert_eq!(encoded[0], LEAF_VERSION);
+        assert_eq!(*encoded.last().unwrap(), 0); // owner flag 0x00
+        let before = leaf_hash(&Sha256Hasher, Some(&a));
+
+        a.set_l1_owner(owner(1)).unwrap();
+        let encoded = canonical_encode(&a);
+        assert_eq!(encoded[0], LEAF_VERSION);
+        assert_eq!(encoded[encoded.len() - 33], 1);
+        assert_eq!(&encoded[encoded.len() - 32..], &[1u8; 32]);
+        let after = leaf_hash(&Sha256Hasher, Some(&a));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn pack_public_values_keys_withdrawals_root_by_batch_seq_not_expiry() {
+        let hasher = Sha256Hasher;
+        let entries = [(owner(1), USDC, Amount(100))];
+        let batch_seq = 7u64;
+        let expiry_height = 0u64;
+        assert_ne!(batch_seq, expiry_height);
+
+        let seq_root = withdrawals_root(&hasher, batch_seq, &entries);
+        let expiry_root = withdrawals_root(&hasher, expiry_height, &entries);
+        assert_ne!(seq_root, expiry_root);
+
+        let matcher = Ed25519PubKey([0x44u8; 32]);
+        let pv = pack_public_values(
+            &[0x11; 32],
+            &[0x22; 32],
+            &seq_root,
+            &matcher,
+            batch_seq,
+            expiry_height,
+        );
+        assert_eq!(pv.len(), PUBLIC_VALUES_LEN);
+        assert_eq!(&pv[64..96], &seq_root);
+        assert_ne!(&pv[64..96], &expiry_root);
+        assert_eq!(&pv[128..136], &batch_seq.to_le_bytes());
+        assert_eq!(&pv[136..144], &expiry_height.to_le_bytes());
+    }
+
+    #[test]
+    fn withdrawal_leaf_v2_is_fixed_65_bytes() {
+        let bytes = encode_withdrawal(1, 0, owner(1), USDC, Amount(400));
+        assert_eq!(bytes.len(), 65);
+        assert_eq!(bytes[0], WITHDRAWAL_VERSION);
+        assert_eq!(&bytes[1..9], &1u64.to_le_bytes());
+        assert_eq!(&bytes[9..13], &0u32.to_le_bytes());
+        assert_eq!(&bytes[13..45], &[1u8; 32]);
+        assert_eq!(&bytes[45..49], &USDC.0.to_le_bytes());
+        assert_eq!(&bytes[49..65], &Amount(400).to_le_bytes());
+    }
+
+    #[test]
     fn order_hash_is_unique_per_salt() {
         use crate::auth::{Order, Side};
 
@@ -751,7 +860,10 @@ mod tests {
         };
         let same = base;
         let diff_salt = Order { salt: 2, ..base };
-        let diff_side = Order { side: Side::Sell, ..base };
+        let diff_side = Order {
+            side: Side::Sell,
+            ..base
+        };
 
         assert_eq!(order_id(&base), order_id(&same));
         assert_ne!(order_id(&base), order_id(&diff_salt));

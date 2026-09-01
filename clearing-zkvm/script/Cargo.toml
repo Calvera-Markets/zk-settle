@@ -17,5 +17,9 @@ uuid = "1.23.2"
 # Sign the maker/taker/matcher orders for the authenticated batch (host side).
 ed25519-dalek = "2"
 
+[dev-dependencies]
+# Host packing test copies SP1's hash_public_inputs (SHA-256 then out[0] &= 0x1F).
+sha2 = "0.10.9"
+
 [build-dependencies]
 sp1-build = "6.0.1"

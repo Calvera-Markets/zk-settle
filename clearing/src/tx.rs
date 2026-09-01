@@ -49,6 +49,9 @@ pub enum Tx {
         asset: AssetId,
         amount: Amount,
         nonce: u64,
+        /// L1 owner (Solana pubkey) of this account. First deposit binds it;
+        /// later deposits must match (`OwnerMismatch`).
+        owner: L1Address,
         /// The account's trading key, registered on the deposit that *creates*
         /// the account (folded into the first deposit — see
         /// `../docs/zkvm-trade-authentication-plan.md`). `None` on subsequent

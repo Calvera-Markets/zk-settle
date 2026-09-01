@@ -289,6 +289,7 @@ impl State {
                 asset,
                 amount,
                 nonce,
+                owner,
                 trading_key,
             } => {
                 // Replay protection: credit a given deposit nonce at most once.
@@ -296,6 +297,10 @@ impl State {
                     return Err(SettlementError::DuplicateDeposit(*nonce));
                 }
                 self.credit(*account, *asset, *amount)?;
+                self.accounts
+                    .entry(*account)
+                    .or_default()
+                    .set_l1_owner(*owner)?;
                 // Register the trading key if the deposit carries one (the first
                 // deposit for an account). Idempotent to the same key; a
                 // conflicting key rejects the whole tx (rolls back the credit).
@@ -312,7 +317,16 @@ impl State {
                 account,
                 asset,
                 amount,
-            } => self.debit(*account, *asset, *amount),
+            } => {
+                if self
+                    .accounts
+                    .get(account)
+                    .is_some_and(|a| a.l1_owner().is_none())
+                {
+                    return Err(SettlementError::OwnerMismatch);
+                }
+                self.debit(*account, *asset, *amount)
+            }
             Tx::Trade { market, fill, auth } => {
                 // Authorization gate. Enforced whenever an operator key is
                 // registered — which, in production, is always: the contract sets
@@ -367,7 +381,10 @@ impl Ledger for State {
         asset: AssetId,
         amount: Amount,
     ) -> Result<(), SettlementError> {
-        self.accounts.entry(account).or_default().credit(asset, amount)
+        self.accounts
+            .entry(account)
+            .or_default()
+            .credit(asset, amount)
     }
 
     fn debit(
@@ -386,6 +403,7 @@ impl Ledger for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id::L1Address;
     use crate::instrument::SettlementKind;
     use crate::settlement::Fill;
     use uuid::Uuid;
@@ -398,6 +416,21 @@ mod tests {
     }
     fn seller() -> AccountId {
         AccountId(Uuid::from_u128(0x5))
+    }
+    fn buyer_owner() -> L1Address {
+        L1Address([1u8; 32])
+    }
+    fn seller_owner() -> L1Address {
+        L1Address([2u8; 32])
+    }
+    fn owner_of(account: AccountId) -> L1Address {
+        if account == buyer() {
+            buyer_owner()
+        } else if account == seller() {
+            seller_owner()
+        } else {
+            L1Address([9u8; 32])
+        }
     }
     fn market() -> MarketId {
         MarketId(Uuid::from_u128(0xA1))
@@ -429,6 +462,7 @@ mod tests {
             asset,
             amount: Amount(amount),
             nonce: NONCE.fetch_add(1, Ordering::Relaxed),
+            owner: owner_of(account),
             trading_key: None,
         }
     }
@@ -441,15 +475,13 @@ mod tests {
             asset: USDC,
             amount: Amount(100),
             nonce: 7,
+            owner: buyer_owner(),
             trading_key: None,
         };
         s.apply(&dep).unwrap();
         assert_eq!(s.balance(buyer(), USDC), Amount(100));
         // Replaying the same nonce is rejected and does not double-credit.
-        assert_eq!(
-            s.apply(&dep),
-            Err(SettlementError::DuplicateDeposit(7))
-        );
+        assert_eq!(s.apply(&dep), Err(SettlementError::DuplicateDeposit(7)));
         assert_eq!(s.balance(buyer(), USDC), Amount(100));
     }
 
@@ -464,10 +496,12 @@ mod tests {
             asset: USDC,
             amount: Amount(100),
             nonce: 0,
+            owner: buyer_owner(),
             trading_key: Some(key),
         })
         .unwrap();
         assert_eq!(s.account(buyer()).unwrap().trading_key(), Some(key));
+        assert_eq!(s.account(buyer()).unwrap().l1_owner(), Some(buyer_owner()));
 
         // A later deposit with the same key is fine; balance keeps growing.
         s.apply(&Tx::Deposit {
@@ -475,6 +509,7 @@ mod tests {
             asset: USDC,
             amount: Amount(50),
             nonce: 1,
+            owner: buyer_owner(),
             trading_key: Some(key),
         })
         .unwrap();
@@ -487,11 +522,58 @@ mod tests {
             asset: USDC,
             amount: Amount(1000),
             nonce: 2,
+            owner: buyer_owner(),
             trading_key: Some(Ed25519PubKey([1u8; 32])),
         };
-        assert_eq!(s.apply(&conflict), Err(SettlementError::KeyAlreadyRegistered));
+        assert_eq!(
+            s.apply(&conflict),
+            Err(SettlementError::KeyAlreadyRegistered)
+        );
         assert_eq!(s.balance(buyer(), USDC), Amount(150));
         assert_eq!(s.account(buyer()).unwrap().trading_key(), Some(key));
+    }
+
+    #[test]
+    fn deposit_binds_owner_and_rejects_mismatch() {
+        let mut s = State::new();
+        s.apply(&Tx::Deposit {
+            account: buyer(),
+            asset: USDC,
+            amount: Amount(100),
+            nonce: 0,
+            owner: buyer_owner(),
+            trading_key: None,
+        })
+        .unwrap();
+        assert_eq!(s.account(buyer()).unwrap().l1_owner(), Some(buyer_owner()));
+
+        let conflict = Tx::Deposit {
+            account: buyer(),
+            asset: USDC,
+            amount: Amount(50),
+            nonce: 1,
+            owner: seller_owner(),
+            trading_key: None,
+        };
+        assert_eq!(s.apply(&conflict), Err(SettlementError::OwnerMismatch));
+        assert_eq!(s.balance(buyer(), USDC), Amount(100));
+        assert_eq!(s.account(buyer()).unwrap().l1_owner(), Some(buyer_owner()));
+    }
+
+    #[test]
+    fn withdraw_without_owner_is_rejected() {
+        let mut funded = Account::new();
+        funded.credit(USDC, Amount(100)).unwrap();
+        let mut s = State::for_replay([(buyer(), funded)], [], None, 0);
+        assert_eq!(
+            s.apply(&Tx::Withdraw {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(10),
+            }),
+            Err(SettlementError::OwnerMismatch)
+        );
+        assert_eq!(s.balance(buyer(), USDC), Amount(100));
     }
 
     #[test]
@@ -628,6 +710,7 @@ mod tests {
                 asset: USDC,
                 amount: Amount(10_000),
                 nonce: 100,
+                owner: buyer_owner(),
                 trading_key: Some(buyer_pk),
             })
             .unwrap();
@@ -636,6 +719,7 @@ mod tests {
                 asset: BTC,
                 amount: Amount(100),
                 nonce: 101,
+                owner: seller_owner(),
                 trading_key: Some(seller_pk),
             })
             .unwrap();
@@ -686,8 +770,14 @@ mod tests {
             let sell_sig = sign(seller_sk, &encode_order(&sell));
             let m = encode_matcher_msg(market(), &order_id(&buy), &order_id(&sell), f);
             TradeAuth {
-                buy: SignedOrder { order: buy, sig: buy_sig },
-                sell: SignedOrder { order: sell, sig: sell_sig },
+                buy: SignedOrder {
+                    order: buy,
+                    sig: buy_sig,
+                },
+                sell: SignedOrder {
+                    order: sell,
+                    sig: sell_sig,
+                },
                 matcher_sig: sign(op_sk, &m),
             }
         }
@@ -783,6 +873,7 @@ mod tests {
                 asset: BTC,
                 amount: Amount(100),
                 nonce: 200,
+                owner: seller_owner(),
                 trading_key: Some(seller_pk),
             })
             .unwrap();
@@ -790,7 +881,14 @@ mod tests {
 
             let f = fill(2, 400);
             let (buyer_sk_wrong, _) = keypair(1);
-            let auth = authorize(&buyer_sk_wrong, &seller_sk, &op_sk, buy_order(1), sell_order(2), &f);
+            let auth = authorize(
+                &buyer_sk_wrong,
+                &seller_sk,
+                &op_sk,
+                buy_order(1),
+                sell_order(2),
+                &f,
+            );
             assert_eq!(
                 s.check_trade_auth(market(), &f, &auth),
                 Err(SettlementError::MissingTradingKey { account: buyer() })
@@ -861,7 +959,11 @@ mod tests {
             let (mut s, ..) = setup();
             let before = s.clone();
             let err = s
-                .apply(&Tx::Trade { market: market(), fill: fill(2, 400), auth: None })
+                .apply(&Tx::Trade {
+                    market: market(),
+                    fill: fill(2, 400),
+                    auth: None,
+                })
                 .unwrap_err();
             assert_eq!(err, SettlementError::InvalidMatcherSignature);
             assert_eq!(s, before); // nothing moved

@@ -93,21 +93,10 @@ pub struct MarketId(pub Uuid);
 pub struct InstrumentId(pub u64);
 
 /// An L1-owned identity that funds are escrowed against on the settlement
-/// contract. A mock uses a UUID; a real contract keys on a 20-byte EVM address.
+/// contract: 32-byte Solana pubkey bytes. Bound onto [`crate::account::Account`]
+/// at first deposit — not derived from [`AccountId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct L1Address(pub Uuid);
-
-impl AccountId {
-    /// The L1 address that owns this account.
-    ///
-    /// **v0 convention:** an L2 account and its L1 owner share a UUID. A real
-    /// system stores an explicit account→owner binding established at deposit
-    /// (S2 of `../docs/settlement-l1-plan.md`); this single method is where that
-    /// binding will live, so withdrawals route to the proven owner.
-    pub fn l1_owner(self) -> L1Address {
-        L1Address(self.0)
-    }
-}
+pub struct L1Address(pub [u8; 32]);
 
 #[cfg(test)]
 mod tests {

@@ -175,7 +175,7 @@ impl Hasher for Poseidon2Hasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+    use crate::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;
     use crate::{ExecutingProver, Prover, State, StateTree, Tx, Witness};
@@ -215,14 +215,37 @@ mod tests {
         );
         let mut t = StateTree::new(Poseidon2Hasher);
         let batch = vec![
-            Tx::Deposit { account: buyer, asset: usdc, amount: Amount(1000), nonce: 0, trading_key: None },
-            Tx::Deposit { account: seller, asset: btc, amount: Amount(5), nonce: 1, trading_key: None },
+            Tx::Deposit {
+                account: buyer,
+                asset: usdc,
+                amount: Amount(1000),
+                nonce: 0,
+                owner: L1Address([1u8; 32]),
+                trading_key: None,
+            },
+            Tx::Deposit {
+                account: seller,
+                asset: btc,
+                amount: Amount(5),
+                nonce: 1,
+                owner: L1Address([2u8; 32]),
+                trading_key: None,
+            },
             Tx::Trade {
                 market,
-                fill: Fill { buyer, seller, base_amount: Amount(2), quote_amount: Amount(400) },
+                fill: Fill {
+                    buyer,
+                    seller,
+                    base_amount: Amount(2),
+                    quote_amount: Amount(400),
+                },
                 auth: None,
             },
-            Tx::Withdraw { account: buyer, asset: usdc, amount: Amount(100) },
+            Tx::Withdraw {
+                account: buyer,
+                asset: usdc,
+                amount: Amount(100),
+            },
         ];
         let w = Witness::capture(&mut s, &mut t, &batch);
         // rebuild cross-check + executing verification, all under Poseidon2

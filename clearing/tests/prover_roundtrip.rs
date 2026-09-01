@@ -6,7 +6,7 @@
 //! prover seam to the commitment's canonical form.
 
 use clearing::commitment::hash_plain::Sha256Hasher;
-use clearing::id::{AccountId, Amount, AssetId, InstrumentId, MarketId};
+use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
 use clearing::{Prover, ReplayProver, State, StateTree, Tx, Witness};
@@ -50,6 +50,7 @@ fn tx_strategy() -> impl Strategy<Value = Tx> {
                 asset: asset(b),
                 amount: Amount(amt),
                 nonce,
+                owner: L1Address([a; 32]),
                 trading_key: None,
             }
         }),
