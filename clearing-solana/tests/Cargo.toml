@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+clearing = { path = "../../clearing" }
 clearing-solana-program = { path = "../program" }
 mollusk-svm.workspace = true
 litesvm.workspace = true
@@ -20,3 +21,4 @@ solana-transaction = "3"
 solana-transaction-error = "3"
 spl-token-2022-interface = "2"
 spl-token-interface = "2"
+uuid = { version = "1", default-features = false }

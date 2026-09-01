@@ -172,3 +172,41 @@ impl DepositIxBytes {
         }
     }
 }
+
+/// `freeze` (disc = 5). Ix data after the discriminator is empty.
+pub fn pack_freeze() -> [u8; 1] {
+    [FREEZE]
+}
+
+/// `escape_withdraw` (disc = 6) instruction data after the discriminator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EscapeWithdrawArgs {
+    pub account_id: [u8; 16],
+    pub asset_id: u32,
+}
+
+impl EscapeWithdrawArgs {
+    pub const LEN: usize = 16 + 4;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() != Self::LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut account_id = [0u8; 16];
+        account_id.copy_from_slice(&data[0..16]);
+        let mut asset_bytes = [0u8; 4];
+        asset_bytes.copy_from_slice(&data[16..20]);
+        Ok(Self {
+            account_id,
+            asset_id: u32::from_le_bytes(asset_bytes),
+        })
+    }
+
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = ESCAPE_WITHDRAW;
+        out[1..17].copy_from_slice(&self.account_id);
+        out[17..21].copy_from_slice(&self.asset_id.to_le_bytes());
+        out
+    }
+}

@@ -1,5 +1,9 @@
 use clearing_solana_program::{
-    error::ClearingError, instruction::InitializeArgs, pda, state::Config, ID as PROGRAM_ID,
+    error::ClearingError,
+    instruction::{self, InitializeArgs},
+    pda,
+    state::Config,
+    ID as PROGRAM_ID,
 };
 use mollusk_svm::{program::keyed_account_for_system_program, result::Check, Mollusk};
 use solana_account::Account;
@@ -146,6 +150,122 @@ fn initialize_rejects_wrong_config_pda() {
         &accounts,
         &[Check::err(ProgramError::Custom(
             ClearingError::InvalidPda as u32,
+        ))],
+    );
+}
+
+fn freeze_ix(signer: Pubkey, config: Pubkey) -> Instruction {
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(signer, true),
+            AccountMeta::new(config, false),
+        ],
+        data: instruction::pack_freeze().to_vec(),
+    }
+}
+
+fn initialized_config(mollusk: &Mollusk) -> (Pubkey, Account, Pubkey) {
+    let payer = Pubkey::new_from_array([7u8; 32]);
+    let (config, _) = pda::find_config(&PROGRAM_ID);
+    let vk_account = Pubkey::new_from_array([9u8; 32]);
+    let (system_program, system_account) = keyed_account_for_system_program();
+    let instruction = initialize_ix(payer, config, vk_account, system_program);
+    let accounts = [
+        (payer, Account::new(1_000_000_000, 0, &system_program)),
+        (config, Account::default()),
+        (vk_account, Account::default()),
+        (system_program, system_account),
+    ];
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+    let config_account = result
+        .resulting_accounts
+        .iter()
+        .find(|(key, _)| key == &config)
+        .expect("config")
+        .1
+        .clone();
+    (config, config_account, system_program)
+}
+
+#[test]
+fn freeze_by_admin_sets_frozen() {
+    let mollusk = setup_mollusk();
+    let (config, config_account, system_program) = initialized_config(&mollusk);
+    let admin = Pubkey::new_from_array(init_args().admin);
+
+    let result = mollusk.process_and_validate_instruction(
+        &freeze_ix(admin, config),
+        &[
+            (admin, Account::new(1_000_000_000, 0, &system_program)),
+            (config, config_account),
+        ],
+        &[Check::success()],
+    );
+    let cfg = Config::unpack(
+        &result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &config)
+            .unwrap()
+            .1
+            .data,
+    )
+    .unwrap();
+    assert_eq!(cfg.frozen, 1);
+}
+
+#[test]
+fn freeze_by_freeze_authority_is_idempotent() {
+    let mollusk = setup_mollusk();
+    let (config, config_account, system_program) = initialized_config(&mollusk);
+    let freeze_authority = Pubkey::new_from_array(init_args().freeze_authority);
+
+    let first = mollusk.process_and_validate_instruction(
+        &freeze_ix(freeze_authority, config),
+        &[
+            (
+                freeze_authority,
+                Account::new(1_000_000_000, 0, &system_program),
+            ),
+            (config, config_account),
+        ],
+        &[Check::success()],
+    );
+    let cfg = Config::unpack(
+        &first
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| k == &config)
+            .unwrap()
+            .1
+            .data,
+    )
+    .unwrap();
+    assert_eq!(cfg.frozen, 1);
+
+    mollusk.process_and_validate_instruction(
+        &freeze_ix(freeze_authority, config),
+        &first.resulting_accounts,
+        &[Check::success()],
+    );
+}
+
+#[test]
+fn freeze_rejects_unauthorized() {
+    let mollusk = setup_mollusk();
+    let (config, config_account, system_program) = initialized_config(&mollusk);
+    let stranger = Pubkey::new_from_array([0xAAu8; 32]);
+
+    mollusk.process_and_validate_instruction(
+        &freeze_ix(stranger, config),
+        &[
+            (stranger, Account::new(1_000_000_000, 0, &system_program)),
+            (config, config_account),
+        ],
+        &[Check::err(ProgramError::Custom(
+            ClearingError::Unauthorized as u32,
         ))],
     );
 }

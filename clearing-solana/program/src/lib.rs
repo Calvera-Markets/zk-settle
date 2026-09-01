@@ -36,6 +36,16 @@ pub fn dispatch(
             let args = instruction::DepositArgs::unpack(rest)?;
             processor::deposit::process(program_id, accounts, &args)
         }
+        instruction::FREEZE => {
+            if !rest.is_empty() {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            processor::freeze::process(program_id, accounts)
+        }
+        instruction::ESCAPE_WITHDRAW => {
+            let args = instruction::EscapeWithdrawArgs::unpack(rest)?;
+            processor::escape::process(program_id, accounts, &args)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
