@@ -44,7 +44,7 @@ pub fn process(
     }
 
     token::require_token_2022_program(token_program)?;
-    token::require_plain_token_2022_mint(mint)?;
+    let mint_decimals = token::require_plain_token_2022_mint(mint)?;
 
     let (expected_config, _) = pda::find_config(program_id);
     if config.address() != &expected_config {
@@ -70,6 +70,9 @@ pub fn process(
     if meta.mint != mint_key || &meta.vault != expected_vault.as_array() {
         return Err(ClearingError::InvalidAccount.into());
     }
+    if mint_decimals != meta.decimals {
+        return Err(ClearingError::InvalidAccount.into());
+    }
 
     let vault_authority = token::vault_authority(program_id, cfg.vault_authority_bump)?;
     token::require_vault(vault, mint.address(), &vault_authority)?;
@@ -90,15 +93,17 @@ pub fn process(
         return Err(ClearingError::AlreadyInitialized.into());
     }
 
-    // Gate trading_key on whether the AccountOwner PDA already existed — not on
-    // trading_key_set. A first deposit with tag 0x00 leaves the flag 0; a later
-    // 0x01 must still fail.
+    // Existence is program-owned + nonempty (not a disc check). Unpack then
+    // verifies the AccountOwner disc; a wrong disc is InvalidAccount.
+    // Gate trading_key on existed — not trading_key_set. A first deposit with
+    // tag 0x00 leaves the flag 0; a later 0x01 must still fail.
     let existed = account_owner.owned_by(program_id) && !account_owner.is_data_empty();
     let mut trading_key = [0u8; 32];
     let mut trading_key_set = 0u8;
 
     if existed {
-        let stored = AccountOwner::unpack(&account_owner.try_borrow()?)?;
+        let stored = AccountOwner::unpack(&account_owner.try_borrow()?)
+            .map_err(|_| ProgramError::from(ClearingError::InvalidAccount))?;
         if &stored.owner != owner.address().as_array() {
             return Err(ClearingError::OwnerMismatch.into());
         }
@@ -106,6 +111,8 @@ pub fn process(
             return Err(ClearingError::KeyAlreadyRegistered.into());
         }
     } else {
+        // First signer binds AccountOwner forever. Predictable account_ids can
+        // be squatted; the operator should assign high-entropy ids.
         if !account_owner.is_writable() {
             return Err(ClearingError::InvalidAccount.into());
         }

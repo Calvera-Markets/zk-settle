@@ -4,6 +4,7 @@ use clearing_solana_program::{
     instruction::{DepositArgs, InitializeArgs, RegisterMintArgs},
     pda,
     state::{AccountOwner, Config, DepositReceipt, MintMeta},
+    token::MAX_REGISTERED_MINTS,
     ID as PROGRAM_ID,
 };
 use solana_instruction::error::InstructionError;
@@ -23,6 +24,7 @@ use spl_token_2022_interface::{
 use spl_token_interface::ID as TOKENKEG;
 
 const DECIMALS: u8 = 6;
+/// Design-doc squat example: first signer binds this id forever.
 const ACCOUNT_ID: [u8; 16] = [0x0B; 16];
 
 fn program_elf() -> Vec<u8> {
@@ -238,6 +240,14 @@ fn token_amount(svm: &LiteSVM, account: &Pubkey) -> u64 {
     TokenAccount::unpack(&acc.data)
         .expect("unpack token")
         .amount
+}
+
+fn poke_config(svm: &mut LiteSVM, config: &Pubkey, f: impl FnOnce(&mut Config)) {
+    let mut acc = svm.get_account(config).expect("config");
+    let mut cfg = Config::unpack(&acc.data).expect("unpack config");
+    f(&mut cfg);
+    cfg.pack(&mut acc.data).expect("pack config");
+    svm.set_account(*config, acc).expect("set config");
 }
 
 #[test]
@@ -602,4 +612,161 @@ fn second_deposit_increments_nonce_and_new_receipt() {
     let (vault, _) = pda::find_vault(&PROGRAM_ID, mint.pubkey().as_array());
     assert_eq!(token_amount(&svm, &vault), 1_000);
     assert_eq!(token_amount(&svm, &ata.pubkey()), 1_000);
+}
+
+#[test]
+fn deposit_rejects_frozen() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+    let mint = create_token_2022_mint(&mut svm, &payer, &payer.pubkey());
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[register_mint_ix(admin.pubkey(), mint.pubkey(), DECIMALS)],
+    );
+    let (user, ata) = funded_user(&mut svm, &payer, &mint.pubkey(), 1_000);
+    poke_config(&mut svm, &config, |cfg| cfg.frozen = 1);
+
+    let err = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[deposit_ix(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            0,
+            DepositArgs {
+                account_id: ACCOUNT_ID,
+                amount: 1_000,
+                trading_key: None,
+            },
+        )],
+    );
+    assert_eq!(err, ClearingError::Frozen as u32);
+}
+
+#[test]
+fn deposit_rejects_zero_amount() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    initialize(&mut svm, &payer, admin.pubkey());
+    let mint = create_token_2022_mint(&mut svm, &payer, &payer.pubkey());
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[register_mint_ix(admin.pubkey(), mint.pubkey(), DECIMALS)],
+    );
+    let (user, ata) = funded_user(&mut svm, &payer, &mint.pubkey(), 1_000);
+
+    let err = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[deposit_ix(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            0,
+            DepositArgs {
+                account_id: ACCOUNT_ID,
+                amount: 0,
+                trading_key: None,
+            },
+        )],
+    );
+    assert_eq!(err, ClearingError::NonPositiveQuantity as u32);
+}
+
+#[test]
+fn register_mint_rejects_seventeenth() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+    poke_config(&mut svm, &config, |cfg| {
+        cfg.next_asset_id = MAX_REGISTERED_MINTS;
+    });
+    let mint = create_token_2022_mint(&mut svm, &payer, &payer.pubkey());
+
+    let err = send_custom_err(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[register_mint_ix(admin.pubkey(), mint.pubkey(), DECIMALS)],
+    );
+    assert_eq!(err, ClearingError::Overflow as u32);
+}
+
+#[test]
+fn register_mint_rejects_non_admin() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    let stranger = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    airdrop(&mut svm, &stranger.pubkey());
+
+    initialize(&mut svm, &payer, admin.pubkey());
+    let mint = create_token_2022_mint(&mut svm, &payer, &payer.pubkey());
+
+    let err = send_custom_err(
+        &mut svm,
+        &stranger,
+        &[&stranger],
+        &[register_mint_ix(stranger.pubkey(), mint.pubkey(), DECIMALS)],
+    );
+    assert_eq!(err, ClearingError::Unauthorized as u32);
+}
+
+#[test]
+fn register_mint_rejects_freeze_authority() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    initialize(&mut svm, &payer, admin.pubkey());
+    let mint = Keypair::new();
+    let rent = svm.minimum_balance_for_rent_exemption(Mint::LEN);
+    let create = solana_system_interface::instruction::create_account(
+        &payer.pubkey(),
+        &mint.pubkey(),
+        rent,
+        Mint::LEN as u64,
+        &TOKEN_2022,
+    );
+    let init = token_2022_ix::initialize_mint2(
+        &TOKEN_2022,
+        &mint.pubkey(),
+        &payer.pubkey(),
+        Some(&payer.pubkey()),
+        DECIMALS,
+    )
+    .unwrap();
+    send(&mut svm, &payer, &[&payer, &mint], &[create, init]);
+
+    let err = send_custom_err(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[register_mint_ix(admin.pubkey(), mint.pubkey(), DECIMALS)],
+    );
+    assert_eq!(err, ClearingError::UnsupportedMint as u32);
 }

@@ -690,7 +690,6 @@ dependencies = [
  "solana-account",
  "solana-instruction",
  "solana-keypair",
- "solana-message",
  "solana-program-error",
  "solana-program-pack",
  "solana-pubkey 3.0.0",

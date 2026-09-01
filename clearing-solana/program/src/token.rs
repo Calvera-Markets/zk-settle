@@ -19,7 +19,8 @@ pub fn require_token_2022_program(token_program: &AccountView) -> Result<(), Pro
 }
 
 /// Mint owner is Token-2022 and account data is exactly the 82-byte base mint
-/// (TLV length 0 / no extensions). Returns on-mint decimals.
+/// (TLV length 0 / no extensions). Freeze authority is also rejected so an
+/// issuer cannot freeze the vault. Returns on-mint decimals.
 pub fn require_plain_token_2022_mint(mint: &AccountView) -> Result<u8, ProgramError> {
     if !mint.owned_by(&TOKEN_2022) {
         return Err(ClearingError::UnsupportedMint.into());
@@ -30,6 +31,9 @@ pub fn require_plain_token_2022_mint(mint: &AccountView) -> Result<u8, ProgramEr
     let mint_state = Mint::from_account_view(mint)?;
     if !mint_state.is_initialized() {
         return Err(ClearingError::InvalidAccount.into());
+    }
+    if mint_state.has_freeze_authority() {
+        return Err(ClearingError::UnsupportedMint.into());
     }
     Ok(mint_state.decimals())
 }
