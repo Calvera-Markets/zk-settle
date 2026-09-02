@@ -1,8 +1,12 @@
 //! Plain Groth16 over BN254 (`alt_bn128`).
 //!
-//! Not the SP1 wrap: no 260-byte prefix, no `hash_public_inputs`. Pairing uses
-//! `groth16-solana` 0.2 `Groth16Verifier::new` on the host and pinocchio
-//! `sol_alt_bn128_group_op` on SBF (crates.io 0.2.0 is not `no_std`).
+//! Pairing uses `groth16-solana` 0.2 `Groth16Verifier::new` on the host and
+//! pinocchio `sol_alt_bn128_group_op` on SBF (crates.io 0.2.0 is not `no_std`).
+//!
+//! SP1 wrap digest helpers (`hash_public_inputs`, `groth16_public_values`) are
+//! copied from succinctlabs/sp1-solana `verifier/src/utils.rs` at
+//! `4181cae00d7493ede8a33066cb56683acb1dca72`. That crate is not a dependency
+//! of this program. Settle still does not call them (v1.1).
 //!
 //! VK account (no `n_ic` word):
 //! ```text
@@ -111,6 +115,30 @@ pub fn encode_vk_account(vk_to_bytes: &[u8]) -> Result<Vec<u8>, ClearingError> {
     out.extend_from_slice(&nr.to_le_bytes());
     out.extend_from_slice(vk_to_bytes);
     Ok(out)
+}
+
+/// SHA-256 of `public_inputs`, then `out[0] &= 0x1F` so the digest fits in BN254 Fr.
+///
+/// Copied from succinctlabs/sp1-solana `verifier/src/utils.rs` at
+/// `4181cae00d7493ede8a33066cb56683acb1dca72`.
+pub fn hash_public_inputs(public_inputs: &[u8]) -> [u8; 32] {
+    let mut result = crate::hash::sha256(&[public_inputs]);
+    result[0] &= 0x1F;
+    result
+}
+
+/// Outer Groth16 public inputs for an SP1 wrap: two 32-byte BE scalars.
+///
+/// Layout matches `load_public_inputs_from_bytes` in the same sp1-solana
+/// commit: a leading zero byte, then `vkey_hash[1..32]`, then the digest of
+/// the guest public values. Copied from `groth16_public_values` there (that
+/// helper returns 63 bytes; this inlines the leading zero).
+pub fn groth16_public_values(sp1_vkey_hash: &[u8; 32], sp1_public_inputs: &[u8]) -> [u8; 64] {
+    let digest = hash_public_inputs(sp1_public_inputs);
+    let mut out = [0u8; 64];
+    out[1..32].copy_from_slice(&sp1_vkey_hash[1..]);
+    out[32..].copy_from_slice(&digest);
+    out
 }
 
 /// Negate a BN254 G1 point `(x, y) → (x, p − y)` over Fq, 64-byte BE uncompressed.
@@ -397,5 +425,46 @@ mod tests {
         assert_ne!(&n[32..], &p[32..]);
         assert_eq!(negate_g1(&n), p);
         assert_eq!(negate_g1(&[0u8; G1_LEN]), [0u8; G1_LEN]);
+    }
+
+    #[test]
+    fn hash_public_inputs_masks_bn254_top_bits() {
+        let pv = [0xABu8; 144];
+        let digest = hash_public_inputs(&pv);
+        assert_eq!(digest[0] & 0xE0, 0);
+        let unmasked = crate::hash::sha256(&[&pv]);
+        let mut expected = unmasked;
+        expected[0] &= 0x1F;
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn hash_public_inputs_matches_sp1_known_answer() {
+        // Vector from sp1-primitives `test_hash_public_values`, same as
+        // clearing-zkvm/script.
+        let mut input = Vec::new();
+        for _ in 0..8 {
+            input.extend_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]);
+        }
+        let digest = hash_public_inputs(&input);
+        let expected = [
+            0x1c, 0xe9, 0x87, 0xd0, 0xa7, 0xfc, 0xc2, 0x63, 0x6f, 0xe8, 0x7e, 0x69, 0x29, 0x5b,
+            0xa1, 0x2b, 0x1c, 0xc4, 0x6c, 0x25, 0x6b, 0x36, 0x9a, 0xe7, 0x40, 0x1c, 0x51, 0xb8,
+            0x05, 0xee, 0x91, 0xbd,
+        ];
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn groth16_public_values_leading_zero_then_vk_tail_then_digest() {
+        let mut vk = [0u8; 32];
+        vk[0] = 0xFF;
+        vk[1] = 0x11;
+        vk[31] = 0x22;
+        let pv = [0x03u8; 144];
+        let out = groth16_public_values(&vk, &pv);
+        assert_eq!(out[0], 0);
+        assert_eq!(&out[1..32], &vk[1..]);
+        assert_eq!(&out[32..], &hash_public_inputs(&pv));
     }
 }

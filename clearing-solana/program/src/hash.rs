@@ -112,7 +112,7 @@ pub fn hash_da(payload: &[u8]) -> [u8; 32] {
     sha256(&[&[0x02], &len, payload])
 }
 
-fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     {
         let mut out = [0u8; 32];
