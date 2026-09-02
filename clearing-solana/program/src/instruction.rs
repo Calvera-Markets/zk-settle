@@ -401,6 +401,17 @@ impl ClaimArgs {
             &data[Self::HEADER_LEN..],
         ))
     }
+
+    pub fn pack_header(&self) -> [u8; 1 + Self::HEADER_LEN] {
+        let mut out = [0u8; 1 + Self::HEADER_LEN];
+        out[0] = CLAIM;
+        out[1..9].copy_from_slice(&self.batch_seq.to_le_bytes());
+        out[9..13].copy_from_slice(&self.index.to_le_bytes());
+        out[13..17].copy_from_slice(&self.asset_id.to_le_bytes());
+        out[17..25].copy_from_slice(&self.amount.to_le_bytes());
+        out[25] = self.n_siblings;
+        out
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,5 +459,14 @@ impl RotateVkArgs {
             groth16_vk_hash_prefix,
             proof_version: data[36],
         })
+    }
+
+    pub fn pack(&self) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = ROTATE_VK;
+        out[1..33].copy_from_slice(&self.guest_vk_hash);
+        out[33..37].copy_from_slice(&self.groth16_vk_hash_prefix);
+        out[37] = self.proof_version;
+        out
     }
 }

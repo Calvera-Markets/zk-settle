@@ -1,16 +1,20 @@
-use ::litesvm::LiteSVM;
 use clearing::account::Account;
 use clearing::commitment::hash_plain::Sha256Hasher;
 use clearing::commitment::{canonical_encode, StateTree};
+use clearing::commitment::{withdrawal_proof, withdrawals_root};
 use clearing::id::{AccountId, Amount, AssetId, L1Address};
 use clearing_solana_program::{
     error::ClearingError,
-    instruction::{self, DepositArgs, EscapeWithdrawArgs, InitializeArgs, RegisterMintArgs},
+    instruction::{
+        self, pack_public_values, ClaimArgs, DepositArgs, EscapeWithdrawArgs, InitializeArgs,
+        RegisterMintArgs, RotateVkArgs, SetAdminArgs, SettleArgs, SETTLE_PROOF_LEN,
+    },
     pda,
-    state::{AccountOwner, Config, DepositReceipt, MintMeta, Nullifier},
+    state::{AccountOwner, BatchRecord, Config, DepositReceipt, MintMeta, Nullifier},
     token::MAX_REGISTERED_MINTS,
     ID as PROGRAM_ID,
 };
+use litesvm::LiteSVM;
 use solana_account::Account as SolAccount;
 use solana_instruction::error::InstructionError;
 use solana_instruction::{AccountMeta, Instruction};
@@ -1237,4 +1241,318 @@ fn escape_rejects_invalid_proof_buffer() {
         )],
     );
     assert_eq!(err, ClearingError::InvalidProofBuffer as u32);
+}
+
+fn settle_ix(
+    admin: Pubkey,
+    vk_account: Pubkey,
+    batch_seq: u64,
+    prev_root: [u8; 32],
+    new_root: [u8; 32],
+    withdrawals_root: [u8; 32],
+    matcher_key: [u8; 32],
+) -> Instruction {
+    let (config, _) = pda::find_config(&PROGRAM_ID);
+    let (batch, _) = pda::find_batch(&PROGRAM_ID, &batch_seq.to_le_bytes());
+    let args = SettleArgs {
+        proof: [0u8; SETTLE_PROOF_LEN],
+        public_values: pack_public_values(
+            &prev_root,
+            &new_root,
+            &withdrawals_root,
+            &matcher_key,
+            batch_seq,
+            0,
+        ),
+        da_hash: [0xDDu8; 32],
+    };
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(admin, true),
+            AccountMeta::new(config, false),
+            AccountMeta::new_readonly(vk_account, false),
+            AccountMeta::new(batch, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+        ],
+        data: args.pack().to_vec(),
+    }
+}
+
+fn claim_ix(
+    claimant: Pubkey,
+    claimant_ata: Pubkey,
+    mint: Pubkey,
+    batch_seq: u64,
+    index: u32,
+    asset_id: u32,
+    amount: u64,
+    siblings: &[[u8; 32]],
+) -> Instruction {
+    let (config, _) = pda::find_config(&PROGRAM_ID);
+    let (mint_meta, _) = pda::find_mint_meta(&PROGRAM_ID, mint.as_array());
+    let (vault, _) = pda::find_vault(&PROGRAM_ID, mint.as_array());
+    let (batch, _) = pda::find_batch(&PROGRAM_ID, &batch_seq.to_le_bytes());
+    let (vault_authority, _) = pda::find_vault_authority(&PROGRAM_ID);
+    let owner = *claimant.as_array();
+    let amt = Amount(amount as i128).to_le_bytes();
+    let leaf =
+        clearing_solana_program::hash::withdrawal_leaf(batch_seq, index, &owner, asset_id, &amt);
+    let (nullifier, _) = pda::find_claim_nullifier(&PROGRAM_ID, &leaf);
+    let header = ClaimArgs {
+        batch_seq,
+        index,
+        asset_id,
+        amount,
+        n_siblings: siblings.len() as u8,
+    }
+    .pack_header();
+    let mut data = header.to_vec();
+    for s in siblings {
+        data.extend_from_slice(s);
+    }
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(claimant, true),
+            AccountMeta::new(claimant_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(mint_meta, false),
+            AccountMeta::new_readonly(config, false),
+            AccountMeta::new_readonly(batch, false),
+            AccountMeta::new(nullifier, false),
+            AccountMeta::new_readonly(TOKEN_2022, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            AccountMeta::new_readonly(vault_authority, false),
+        ],
+        data,
+    }
+}
+
+const VK_ACCOUNT: [u8; 32] = [9u8; 32];
+
+#[test]
+fn claim_pays_once_and_rejects_replay_and_bad_amount() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    let amount = 1_000u64;
+    let (config, mint, vault) = funded_vault(&mut svm, &payer, &admin, amount);
+    let (user, ata) = funded_user(&mut svm, &payer, &mint.pubkey(), 0);
+
+    let owner = L1Address(*user.pubkey().as_array());
+    let entries = [(owner, AssetId(0), Amount(amount as i128))];
+    let hasher = Sha256Hasher;
+    let w_root = withdrawals_root(&hasher, 0, &entries);
+    let siblings = withdrawal_proof(&hasher, 0, &entries, 0);
+
+    let genesis = Config::unpack(&svm.get_account(&config).unwrap().data)
+        .unwrap()
+        .root;
+    let matcher = init_args(admin.pubkey()).matcher_key;
+    let vk = Pubkey::new_from_array(VK_ACCOUNT);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix(
+            admin.pubkey(),
+            vk,
+            0,
+            genesis,
+            [0xAAu8; 32],
+            w_root,
+            matcher,
+        )],
+    );
+
+    let rec = BatchRecord::unpack(
+        &svm.get_account(&pda::find_batch(&PROGRAM_ID, &0u64.to_le_bytes()).0)
+            .unwrap()
+            .data,
+    )
+    .unwrap();
+    assert_eq!(rec.withdrawals_root, w_root);
+
+    let vault_before = token_amount(&svm, &vault);
+    send_ok(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            0,
+            0,
+            0,
+            amount,
+            &siblings,
+        )],
+    );
+    assert_eq!(token_amount(&svm, &ata.pubkey()), amount);
+    assert_eq!(token_amount(&svm, &vault), vault_before - amount);
+
+    svm.expire_blockhash();
+    let replay = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            0,
+            0,
+            0,
+            amount,
+            &siblings,
+        )],
+    );
+    assert_eq!(replay, ClearingError::AlreadyInitialized as u32);
+
+    // Fresh svm for bad-amount: settle same root, wrong amount fails inclusion.
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let (_config, mint, vault) = funded_vault(&mut svm, &payer, &admin, amount);
+    let (user, ata) = funded_user(&mut svm, &payer, &mint.pubkey(), 0);
+    let owner = L1Address(*user.pubkey().as_array());
+    let entries = [(owner, AssetId(0), Amount(amount as i128))];
+    let w_root = withdrawals_root(&Sha256Hasher, 0, &entries);
+    let siblings = withdrawal_proof(&Sha256Hasher, 0, &entries, 0);
+    let genesis = [0x11u8; 32];
+    let matcher = init_args(admin.pubkey()).matcher_key;
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix(
+            admin.pubkey(),
+            Pubkey::new_from_array(VK_ACCOUNT),
+            0,
+            genesis,
+            [0xAAu8; 32],
+            w_root,
+            matcher,
+        )],
+    );
+    let vault_before = token_amount(&svm, &vault);
+    let err = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            0,
+            0,
+            0,
+            amount + 1,
+            &siblings,
+        )],
+    );
+    assert_eq!(err, ClearingError::InvalidProof as u32);
+    assert_eq!(token_amount(&svm, &vault), vault_before);
+}
+
+#[test]
+fn set_admin_rotates_without_touching_matcher_key() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    let new_admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    airdrop(&mut svm, &new_admin.pubkey());
+
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+    let matcher = Config::unpack(&svm.get_account(&config).unwrap().data)
+        .unwrap()
+        .matcher_key;
+
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+            ],
+            data: SetAdminArgs {
+                new_admin: *new_admin.pubkey().as_array(),
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+    let cfg = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(cfg.admin, *new_admin.pubkey().as_array());
+    assert_eq!(cfg.matcher_key, matcher);
+
+    let err = send_custom_err(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+            ],
+            data: SetAdminArgs {
+                new_admin: *admin.pubkey().as_array(),
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+    assert_eq!(err, ClearingError::Unauthorized as u32);
+}
+
+#[test]
+fn rotate_vk_updates_config_fields() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+    let new_vk = Pubkey::new_from_array([0xEEu8; 32]);
+    write_account(&mut svm, new_vk, PROGRAM_ID, vec![0u8; 8]);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(new_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0x11u8; 32],
+                groth16_vk_hash_prefix: [1, 2, 3, 4],
+                proof_version: 1,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+    let cfg = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(cfg.vk_account, *new_vk.as_array());
+    assert_eq!(cfg.guest_vk_hash, [0x11u8; 32]);
+    assert_eq!(cfg.groth16_vk_hash_prefix, [1, 2, 3, 4]);
+    assert_eq!(cfg.proof_version, 1);
 }

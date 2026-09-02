@@ -1,6 +1,9 @@
 use clearing_solana_program::{
     error::ClearingError,
-    instruction::{pack_public_values, InitializeArgs, SettleArgs, SETTLE_PROOF_LEN},
+    instruction::{
+        pack_public_values, InitializeArgs, RotateVkArgs, SetAdminArgs, SettleArgs,
+        SETTLE_PROOF_LEN,
+    },
     pda,
     state::{BatchRecord, Config},
     ID as PROGRAM_ID,
@@ -448,4 +451,81 @@ fn second_settle_requires_previous_new_root() {
     let rec1 = BatchRecord::unpack(&second.get_account(&batch1).unwrap().data).unwrap();
     assert_eq!(rec1.seq, 1);
     assert_eq!(rec1.new_root, NEW_ROOT_2);
+}
+
+#[test]
+fn set_admin_and_rotate_vk() {
+    let mollusk = setup_mollusk();
+    let payer = Pubkey::new_from_array([7u8; 32]);
+    let vk_account = Pubkey::new_from_array([9u8; 32]);
+    let (config, config_acc, vk_acc, system_program, system_account) =
+        initialize_for_settle(&mollusk, payer, vk_account);
+    let new_admin = Pubkey::new_from_array([0xABu8; 32]);
+    let set = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(ADMIN, true),
+            AccountMeta::new(config, false),
+        ],
+        data: SetAdminArgs {
+            new_admin: *new_admin.as_array(),
+        }
+        .pack()
+        .to_vec(),
+    };
+    let after_set = mollusk.process_and_validate_instruction(
+        &set,
+        &[
+            (ADMIN, funded_system_account(&system_program)),
+            (config, config_acc.clone()),
+        ],
+        &[Check::success()],
+    );
+    let cfg = Config::unpack(&after_set.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(cfg.admin, *new_admin.as_array());
+    assert_eq!(cfg.matcher_key, MATCHER_KEY);
+
+    let impostor = mollusk.process_and_validate_instruction(
+        &set,
+        &[
+            (ADMIN, funded_system_account(&system_program)),
+            (config, after_set.get_account(&config).unwrap().clone()),
+        ],
+        &[Check::err(ProgramError::Custom(
+            ClearingError::Unauthorized as u32,
+        ))],
+    );
+    let _ = impostor;
+
+    let new_vk = Pubkey::new_from_array([0xEEu8; 32]);
+    let rotate = Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(new_admin, true),
+            AccountMeta::new(config, false),
+            AccountMeta::new_readonly(new_vk, false),
+        ],
+        data: RotateVkArgs {
+            guest_vk_hash: [0x11u8; 32],
+            groth16_vk_hash_prefix: [1, 2, 3, 4],
+            proof_version: 1,
+        }
+        .pack()
+        .to_vec(),
+    };
+    let after_rot = mollusk.process_and_validate_instruction(
+        &rotate,
+        &[
+            (new_admin, funded_system_account(&system_program)),
+            (config, after_set.get_account(&config).unwrap().clone()),
+            (new_vk, Account::default()),
+            (vk_account, vk_acc),
+            (system_program, system_account),
+        ],
+        &[Check::success()],
+    );
+    let cfg = Config::unpack(&after_rot.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(cfg.vk_account, *new_vk.as_array());
+    assert_eq!(cfg.guest_vk_hash, [0x11u8; 32]);
+    assert_eq!(cfg.proof_version, 1);
 }

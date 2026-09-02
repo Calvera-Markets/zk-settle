@@ -184,4 +184,20 @@ mod tests {
         }
         assert_eq!(from_left, node);
     }
+
+    #[test]
+    fn withdrawal_leaf_is_65_byte_preimage() {
+        let owner = [7u8; 32];
+        let amt = 1_000i128.to_le_bytes();
+        let enc = encode_withdrawal(3, 0, &owner, 0, &amt);
+        assert_eq!(enc.len(), 65);
+        assert_eq!(enc[0], 2);
+        assert_eq!(&enc[1..9], &3u64.to_le_bytes());
+        let leaf = withdrawal_leaf(3, 0, &owner, 0, &amt);
+        assert_eq!(leaf, hash_leaf(&enc));
+        let empty = hash_leaf(&[]);
+        let root = hash_node(&leaf, &empty);
+        assert!(verify_withdrawal(&root, 3, 0, &owner, 0, &amt, &[empty]));
+        assert!(!verify_withdrawal(&root, 3, 0, &owner, 0, &amt, &[]));
+    }
 }
