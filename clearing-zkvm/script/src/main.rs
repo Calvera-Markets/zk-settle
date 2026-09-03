@@ -5,6 +5,9 @@
 //!   cargo run --release -- --prove     # generate + verify a fast CORE proof
 //!   cargo run --release -- --groth16   # generate + verify the ON-CHAIN Groth16
 //!                                       # proof (the heavy gnark wrap; times it)
+//!   cargo run --release -- --groth16 --dump-dir DIR
+//!                                       # also write proof/pv/vk artifacts for
+//!                                       # clearing-solana wrap tests (260-byte proof)
 //!
 //! `--execute` runs the `ExecutingProver` *inside* the zkVM and returns the
 //! committed 144-byte public-values slice (`prev_root ‖ new_root ‖
@@ -29,10 +32,12 @@ use clearing::commitment::hash_plain::Sha256Hasher as H;
 #[cfg(feature = "poseidon2")]
 use clearing::commitment::hash_poseidon2::Poseidon2Hasher as H;
 use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha256};
 use sp1_sdk::{
     blocking::{ProveRequest as _, Prover as _, ProverClient},
-    include_elf, Elf, ProvingKey as _, SP1Stdin,
+    include_elf, Elf, HashableKey, ProvingKey as _, SP1Stdin,
 };
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const ELF: Elf = include_elf!("clearing-program");
@@ -199,10 +204,125 @@ fn build_witness(n_trades: u64) -> (Witness, Ed25519PubKey, u64, u64) {
     (witness, op_pk, expiry_height, batch_seq)
 }
 
+fn arg_value(flag: &str) -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(a) = args.next() {
+        if a == flag {
+            return args.next();
+        }
+        if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn default_dump_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clearing-solana/fixtures/sp1")
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+fn find_groth16_vk(prefix: &[u8; 4]) -> Option<(PathBuf, Vec<u8>)> {
+    let mut candidates = Vec::new();
+    if let Some(p) = std::env::var_os("SP1_GROTH16_VK") {
+        candidates.push(PathBuf::from(p));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let root = PathBuf::from(home).join(".sp1/circuits");
+        if let Ok(walk) = std::fs::read_dir(&root) {
+            fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+                let Ok(rd) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        collect(&p, out);
+                    } else if p.file_name().is_some_and(|n| n == "groth16_vk.bin") {
+                        out.push(p);
+                    }
+                }
+            }
+            collect(&root, &mut candidates);
+        }
+    }
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(&path) {
+            let hash = sha256_bytes(&bytes);
+            if hash[..4] == prefix[..] {
+                return Some((path, bytes));
+            }
+        }
+    }
+    None
+}
+
+fn dump_wrap_artifacts(
+    dir: &Path,
+    proof_bytes: &[u8],
+    public_values: &[u8],
+    guest_vk_hash: &[u8; 32],
+) {
+    assert_eq!(
+        proof_bytes.len(),
+        260,
+        "Groth16 wrap proof must be 260 bytes (4-byte gnark vk prefix + A||B||C); got {}",
+        proof_bytes.len()
+    );
+    assert_eq!(public_values.len(), PUBLIC_VALUES_LEN);
+    std::fs::create_dir_all(dir).expect("create dump dir");
+    std::fs::write(dir.join("proof.bin"), proof_bytes).expect("write proof.bin");
+    std::fs::write(dir.join("public_values.bin"), public_values).expect("write public_values.bin");
+    std::fs::write(dir.join("guest_vk_hash.bin"), guest_vk_hash).expect("write guest_vk_hash.bin");
+
+    let prefix: [u8; 4] = proof_bytes[..4].try_into().unwrap();
+    let mut meta = String::new();
+    meta.push_str(&format!("proof_len={}\n", proof_bytes.len()));
+    meta.push_str(&format!("sp1-sdk=6.0.1 (lock may resolve newer)\n"));
+    meta.push_str(&format!(
+        "groth16_vk_hash_prefix={}\n",
+        prefix
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ));
+
+    match find_groth16_vk(&prefix) {
+        Some((path, bytes)) => {
+            let vk_hash = sha256_bytes(&bytes);
+            std::fs::write(dir.join("groth16_vk.bin"), &bytes).expect("write groth16_vk.bin");
+            meta.push_str(&format!("groth16_vk_path={}\n", path.display()));
+            meta.push_str(&format!(
+                "groth16_vk_sha256={}\n",
+                vk_hash
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ));
+            meta.push_str("GROTH16_VK_match=prefix of SHA256(gnark_vk.bin) == proof[0..4]\n");
+        }
+        None => {
+            meta.push_str("groth16_vk_path=NOT_FOUND set SP1_GROTH16_VK\n");
+        }
+    }
+    std::fs::write(dir.join("meta.txt"), meta).expect("write meta.txt");
+    println!("dumped wrap artifacts to {}", dir.display());
+}
+
 fn main() {
     sp1_sdk::utils::setup_logger();
     let do_groth16 = std::env::args().any(|a| a == "--groth16");
     let do_prove = do_groth16 || std::env::args().any(|a| a == "--prove");
+    let dump_dir = arg_value("--dump-dir").map(PathBuf::from).or_else(|| {
+        if do_groth16 {
+            Some(default_dump_dir())
+        } else {
+            None
+        }
+    });
 
     // Number of trades in the batch (default 1). Set TRADES=100 to measure how
     // cycles scale with trade count.
@@ -296,6 +416,13 @@ fn main() {
             "    total   : {:.2?}",
             exec_time + setup_time + prove_time + verify_time
         );
+
+        if do_groth16 {
+            if let Some(dir) = dump_dir.as_ref() {
+                let guest_vk_hash = pk.verifying_key().bytes32_raw();
+                dump_wrap_artifacts(dir, &proof.bytes(), pv, &guest_vk_hash);
+            }
+        }
     }
 }
 
