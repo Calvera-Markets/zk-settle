@@ -29,6 +29,10 @@ use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 use crate::error::ClearingError;
 
 pub const PROOF_LEN: usize = 256;
+/// SP1 wrap: `SHA256(gnark_vk)[0..4] ‖ A ‖ B ‖ C` (A not yet negated).
+pub const WRAP_PROOF_LEN: usize = 260;
+pub const WRAP_PREFIX_LEN: usize = 4;
+const _: () = assert!(WRAP_PROOF_LEN == crate::instruction::SETTLE_PROOF_LEN);
 pub const VK_FIXED_LEN: usize = 452;
 pub const G1_LEN: usize = 64;
 pub const G2_LEN: usize = 128;
@@ -115,6 +119,37 @@ pub fn encode_vk_account(vk_to_bytes: &[u8]) -> Result<Vec<u8>, ClearingError> {
     out.extend_from_slice(&nr.to_le_bytes());
     out.extend_from_slice(vk_to_bytes);
     Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParsedWrapProof {
+    pub a: [u8; G1_LEN],
+    pub b: [u8; G2_LEN],
+    pub c: [u8; G1_LEN],
+}
+
+/// Split a 260-byte wrap proof and check the gnark VK prefix.
+///
+/// `expected_prefix` is `SHA256(gnark_vk_file)[0..4]`, stored on `Config`.
+/// A is returned *not* negated; the caller (and `verify_plain`) always negates A.
+pub fn parse_wrap_proof(
+    proof: &[u8; WRAP_PROOF_LEN],
+    expected_prefix: &[u8; WRAP_PREFIX_LEN],
+) -> Result<ParsedWrapProof, ClearingError> {
+    if proof[..WRAP_PREFIX_LEN] != expected_prefix[..] {
+        return Err(ClearingError::InvalidProof);
+    }
+    Ok(ParsedWrapProof {
+        a: proof[WRAP_PREFIX_LEN..WRAP_PREFIX_LEN + G1_LEN]
+            .try_into()
+            .map_err(|_| ClearingError::InvalidProof)?,
+        b: proof[WRAP_PREFIX_LEN + G1_LEN..WRAP_PREFIX_LEN + G1_LEN + G2_LEN]
+            .try_into()
+            .map_err(|_| ClearingError::InvalidProof)?,
+        c: proof[WRAP_PREFIX_LEN + G1_LEN + G2_LEN..]
+            .try_into()
+            .map_err(|_| ClearingError::InvalidProof)?,
+    })
 }
 
 /// SHA-256 of `public_inputs`, then `out[0] &= 0x1F` so the digest fits in BN254 Fr.
@@ -466,5 +501,27 @@ mod tests {
         assert_eq!(out[0], 0);
         assert_eq!(&out[1..32], &vk[1..]);
         assert_eq!(&out[32..], &hash_public_inputs(&pv));
+    }
+
+    #[test]
+    fn parse_wrap_proof_splits_prefix_and_points() {
+        let mut proof = [0u8; WRAP_PROOF_LEN];
+        proof[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        proof[4] = 0xAA;
+        proof[68] = 0xBB;
+        proof[196] = 0xCC;
+        let parsed = parse_wrap_proof(&proof, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(parsed.a[0], 0xAA);
+        assert_eq!(parsed.b[0], 0xBB);
+        assert_eq!(parsed.c[0], 0xCC);
+    }
+
+    #[test]
+    fn parse_wrap_proof_rejects_wrong_prefix() {
+        let proof = [0u8; WRAP_PROOF_LEN];
+        assert_eq!(
+            parse_wrap_proof(&proof, &[1, 2, 3, 4]).unwrap_err(),
+            ClearingError::InvalidProof
+        );
     }
 }
