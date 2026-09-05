@@ -215,6 +215,37 @@ fn is_less_than_fr_modulus(bytes: &[u8; FR_LEN]) -> bool {
     *bytes < FR_MODULUS_BE
 }
 
+/// Verify an SP1 Groth16 wrap proof (`proof_version = 1`).
+///
+/// Outer inputs are `(guest_vk_hash, hash_public_inputs(public_values))` as two
+/// BE scalars. Always negates A. `vk_account_data` is the decompressed wrap VK
+/// (`nr_pubinputs == 2`).
+pub fn verify_sp1_wrap(
+    vk_account_data: &[u8],
+    guest_vk_hash: &[u8; 32],
+    groth16_vk_hash_prefix: &[u8; WRAP_PREFIX_LEN],
+    proof: &[u8; WRAP_PROOF_LEN],
+    public_values: &[u8],
+) -> Result<(), ClearingError> {
+    let parsed = parse_wrap_proof(proof, groth16_vk_hash_prefix)?;
+    let a_neg = negate_g1(&parsed.a);
+    let outer = groth16_public_values(guest_vk_hash, public_values);
+    let input0: [u8; FR_LEN] = outer[0..FR_LEN]
+        .try_into()
+        .map_err(|_| ClearingError::InvalidProof)?;
+    let input1: [u8; FR_LEN] = outer[FR_LEN..]
+        .try_into()
+        .map_err(|_| ClearingError::InvalidProof)?;
+    if !is_less_than_fr_modulus(&input0) || !is_less_than_fr_modulus(&input1) {
+        return Err(ClearingError::InvalidProof);
+    }
+    let vk = parse_vk(vk_account_data)?;
+    if vk.nr_pubinputs != 2 {
+        return Err(ClearingError::InvalidProof);
+    }
+    pairing_verify(&a_neg, &parsed.b, &parsed.c, &[input0, input1], &vk)
+}
+
 /// Verify a 256-byte circuits-wire proof against a VK account. Always negates A.
 pub fn verify_plain(
     vk_account_data: &[u8],
@@ -521,6 +552,29 @@ mod tests {
         let proof = [0u8; WRAP_PROOF_LEN];
         assert_eq!(
             parse_wrap_proof(&proof, &[1, 2, 3, 4]).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+    }
+
+    #[test]
+    fn verify_sp1_wrap_rejects_junk_proof() {
+        let vk = dummy_vk_bytes(3, 2);
+        let proof = [0u8; WRAP_PROOF_LEN];
+        let pv = [0x11u8; 144];
+        // Wrong gnark-vk prefix: parse fails before pairing (no fixture needed).
+        assert_eq!(
+            verify_sp1_wrap(&vk, &[0u8; 32], &[1, 2, 3, 4], &proof, &pv).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+    }
+
+    #[test]
+    fn verify_sp1_wrap_rejects_wrong_nr_pubinputs() {
+        let vk = dummy_vk_bytes(2, 1);
+        let proof = [0u8; WRAP_PROOF_LEN];
+        let pv = [0u8; 144];
+        assert_eq!(
+            verify_sp1_wrap(&vk, &[0u8; 32], &[0u8; 4], &proof, &pv).unwrap_err(),
             ClearingError::InvalidProof
         );
     }

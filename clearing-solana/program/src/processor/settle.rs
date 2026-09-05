@@ -53,7 +53,10 @@ pub fn process(program_id: &Address, accounts: &[AccountView], args: &SettleArgs
         return Err(ClearingError::AlreadyInitialized.into());
     }
 
-    verify_or_skip_proof(cfg.proof_version)?;
+    {
+        let vk_data = vk_account.try_borrow()?;
+        verify_or_skip_proof(&cfg, &vk_data, args)?;
+    }
 
     let pv = args.public_values();
     if pv.prev_root != cfg.root
@@ -105,17 +108,26 @@ pub fn process(program_id: &Address, accounts: &[AccountView], args: &SettleArgs
 ///
 /// * `mock-proof` + `proof_version == 0`: skip pairing (host / test SBF).
 ///   Production `bpf-entrypoint` builds do not enable `mock-proof`.
-/// * SBF without `mock-proof`: `proof_version != 1` → `InvalidProof`.
-/// * `proof_version == 1`: SP1 wrap (v1.1); not wired, so `InvalidProof`.
-fn verify_or_skip_proof(proof_version: u8) -> Result<(), ClearingError> {
-    if skip_pairing(proof_version) {
+/// * Without skip: `proof_version != 1` → `InvalidProof`.
+/// * `proof_version == 1`: SP1 wrap pairing.
+fn verify_or_skip_proof(
+    cfg: &Config,
+    vk_account_data: &[u8],
+    args: &SettleArgs,
+) -> Result<(), ClearingError> {
+    if skip_pairing(cfg.proof_version) {
         return Ok(());
     }
-    if proof_version != 1 {
+    if cfg.proof_version != 1 {
         return Err(ClearingError::InvalidProof);
     }
-    // SP1 wrap (v1.1) is not wired.
-    Err(ClearingError::InvalidProof)
+    crate::verifier::verify_sp1_wrap(
+        vk_account_data,
+        &cfg.guest_vk_hash,
+        &cfg.groth16_vk_hash_prefix,
+        &args.proof,
+        &args.public_values,
+    )
 }
 
 fn skip_pairing(proof_version: u8) -> bool {
