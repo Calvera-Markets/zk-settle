@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use crate::account::Account;
 use crate::commitment::{
-    Hash, Hasher, canonical_encode, default_hashes, root_from_path, verify_withdrawal,
-    withdrawals_root,
+    canonical_encode, default_hashes, root_from_path, verify_withdrawal, withdrawals_root, Hash,
+    Hasher,
 };
 use crate::da::DaBlob;
 use crate::id::{AccountId, Amount, AssetId, L1Address};
@@ -534,14 +534,25 @@ impl<V: Prover> MockSettlementContract<V> {
 
     /// The north-star solvency invariant: for every asset in `assets`, escrow
     /// equals the sum of all L2 balances **plus authorized-but-unclaimed
-    /// withdrawals** of that asset. The pending term matters now that withdrawals
-    /// are claimed asynchronously: a proven withdrawal has already debited the L2
-    /// balance, but its escrow isn't released until the user claims — so escrow
+    /// withdrawals** of that asset. Escaped `(account, asset)` pairs are omitted
+    /// from the L2 sum: escape pays from escrow without mutating the off-chain
+    /// state machine. The pending term matters now that withdrawals are claimed
+    /// asynchronously: a proven withdrawal has already debited the L2 balance,
+    /// but its escrow isn't released until the user claims — so escrow
     /// temporarily exceeds Σ L2 by exactly the unclaimed amount. (Holds at settled
     /// points; in-flight unverified batches remain the documented exception.)
     pub fn is_solvent(&self, state: &State, assets: &[AssetId]) -> bool {
         assets.iter().all(|&asset| {
-            let l2: i128 = state.accounts().map(|(_, a)| a.balance(asset).0).sum();
+            let l2: i128 = state
+                .accounts()
+                .map(|(id, a)| {
+                    if self.escaped.contains(&(*id, asset)) {
+                        0
+                    } else {
+                        a.balance(asset).0
+                    }
+                })
+                .sum();
             self.total_escrow(asset) == l2 + self.pending_withdrawals(asset).0
         })
     }
@@ -551,8 +562,8 @@ impl<V: Prover> MockSettlementContract<V> {
 mod tests {
     use super::*;
     use crate::account::Account;
-    use crate::commitment::StateTree;
     use crate::commitment::hash_plain::Sha256Hasher;
+    use crate::commitment::StateTree;
     use crate::id::{AccountId, InstrumentId, L1Address, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;
