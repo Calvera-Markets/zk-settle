@@ -157,11 +157,9 @@ fn deposit_trade_withdraw_settles_and_stays_solvent() {
     assert_eq!(contract.pending_withdrawals(USDC), Amount::ZERO);
     assert!(contract.is_solvent(engine.state(), &assets));
     // A second claim (replay) is rejected by the nullifier.
-    assert!(
-        contract
-            .claim(&Sha256Hasher, 2, 0, owner, USDC, Amount(100), &siblings)
-            .is_err()
-    );
+    assert!(contract
+        .claim(&Sha256Hasher, 2, 0, owner, USDC, Amount(100), &siblings)
+        .is_err());
 
     // ---- whole-loop assertions --------------------------------------------
     // Every batch advanced the root, and the chain is unbroken from genesis to
@@ -505,4 +503,130 @@ fn escape_rejects_theft_of_another_accounts_leaf() {
         Err(SettleError::OwnerMismatch)
     );
     assert_eq!(contract.total_escrow(USDC), escrow_before);
+}
+
+/// Operator goes dark after a verified-but-unclaimed withdraw. Users reconstruct
+/// from DA blobs only and escape remaining L2 balances. Solvency holds.
+#[test]
+fn operator_dark_e2e_reconstructs_from_da() {
+    let assets = [USDC, BTC];
+    let mut engine = engine();
+    let mut contract = MockSettlementContract::new(ExecutingProver::new(Sha256Hasher), genesis());
+
+    let d1 = contract
+        .deposit(buyer(), USDC, Amount(1000), buyer_owner())
+        .unwrap();
+    let d2 = contract
+        .deposit(seller(), BTC, Amount(5), seller_owner())
+        .unwrap();
+    let o1 = engine.step(vec![d1, d2]).unwrap();
+    contract.commit(o1.proposal()).unwrap();
+    contract.verify_next(&Sha256Hasher).unwrap();
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    let o2 = engine
+        .step(vec![Tx::Trade {
+            market: market(),
+            fill: Fill {
+                buyer: buyer(),
+                seller: seller(),
+                base_amount: Amount(2),
+                quote_amount: Amount(400),
+            },
+            auth: None,
+        }])
+        .unwrap();
+    contract.commit(o2.proposal()).unwrap();
+    contract.verify_next(&Sha256Hasher).unwrap();
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    // Verified withdraw, left unclaimed so pending is in the invariant.
+    let o3 = engine
+        .step(vec![Tx::Withdraw {
+            account: buyer(),
+            asset: USDC,
+            amount: Amount(100),
+        }])
+        .unwrap();
+    contract.commit(o3.proposal()).unwrap();
+    contract.verify_next(&Sha256Hasher).unwrap();
+    assert_eq!(contract.pending_withdrawals(USDC), Amount(100));
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    contract.freeze();
+    assert!(contract.is_frozen());
+    assert_eq!(
+        contract.verify_next(&Sha256Hasher),
+        Err(SettleError::Frozen)
+    );
+
+    let accounts = clearing::da::reconstruct(contract.da_blobs());
+    let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
+    assert_eq!(tree.root(), contract.root());
+
+    let buyer_acct = accounts.get(&buyer()).cloned().unwrap();
+    let seller_acct = accounts.get(&seller()).cloned().unwrap();
+    let (bmask, bsibs) = tree.prove(buyer());
+    let (smask, ssibs) = tree.prove(seller());
+
+    // Remaining L2 after the unclaimed 100 USDC withdraw: buyer 500 USDC + 2 BTC.
+    assert_eq!(buyer_acct.balance(USDC), Amount(500));
+    let got_usdc = contract
+        .escape_withdraw(
+            &Sha256Hasher,
+            buyer(),
+            &buyer_acct,
+            bmask,
+            &bsibs,
+            USDC,
+            buyer_owner(),
+        )
+        .unwrap();
+    assert_eq!(got_usdc, Amount(500));
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    let got_btc = contract
+        .escape_withdraw(
+            &Sha256Hasher,
+            buyer(),
+            &buyer_acct,
+            bmask,
+            &bsibs,
+            BTC,
+            buyer_owner(),
+        )
+        .unwrap();
+    assert_eq!(got_btc, Amount(2));
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    let got_s_usdc = contract
+        .escape_withdraw(
+            &Sha256Hasher,
+            seller(),
+            &seller_acct,
+            smask,
+            &ssibs,
+            USDC,
+            seller_owner(),
+        )
+        .unwrap();
+    assert_eq!(got_s_usdc, Amount(400));
+    let got_s_btc = contract
+        .escape_withdraw(
+            &Sha256Hasher,
+            seller(),
+            &seller_acct,
+            smask,
+            &ssibs,
+            BTC,
+            seller_owner(),
+        )
+        .unwrap();
+    assert_eq!(got_s_btc, Amount(3));
+    assert!(contract.is_solvent(engine.state(), &assets));
+
+    // Unclaimed withdraw still sits in escrow; L2 for those 100 is already gone.
+    assert_eq!(contract.pending_withdrawals(USDC), Amount(100));
+    assert_eq!(contract.total_escrow(USDC), 100);
+    assert_eq!(contract.total_escrow(BTC), 0);
 }

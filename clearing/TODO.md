@@ -132,8 +132,12 @@ and later netting/margin.)
   verify records claimable; each user calls a per-user `claim()` (same Merkle
   check as `escape_withdraw`, against the live root). Unifies with the escape
   hatch.
-- **S6 — solvency property test + full end-to-end** (incl. an operator-dark
-  escape scenario).
+- **S6 — solvency property test + full end-to-end (done).**
+  `tests/solvency.rs` proptests random deposit/trade/withdraw/claim/freeze/escape
+  sequences against `is_solvent` at every settled point. `tests/settlement_e2e.rs`
+  `operator_dark_e2e_reconstructs_from_da` is the scripted operator-dark exit
+  (DA reconstruct, both users escape, pending-claim term still counted).
+  S4 (deadline auto-freeze) is not this.
 
 ## Deferred (final)
 
