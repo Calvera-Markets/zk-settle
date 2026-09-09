@@ -1,0 +1,3 @@
+# Guest cargo runs from this crate dir and may not see the workspace config.
+[env]
+CLEARING_TREE_DEPTH = "8"

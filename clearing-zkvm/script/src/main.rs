@@ -1,25 +1,17 @@
-//! Host: build a clearing batch witness, run it through the zkVM guest, and
-//! (optionally) generate a proof.
+//! Host: build a tiny clearing batch (1 trade, tree depth from
+//! `CLEARING_TREE_DEPTH`, default 8 in this workspace) and run it in the guest.
 //!
-//!   cargo run --release                # execute only (runs the guest, no proof)
-//!   cargo run --release -- --prove     # generate + verify a fast CORE proof
-//!   cargo run --release -- --groth16   # generate + verify the ON-CHAIN Groth16
-//!                                       # proof (the heavy gnark wrap; times it)
-//!   cargo run --release -- --groth16 --dump-dir DIR
-//!                                       # also write proof/pv/vk artifacts for
-//!                                       # clearing-solana wrap tests (260-byte proof)
+//! Tests / day-to-day:
 //!
-//! `--execute` runs the `ExecutingProver` *inside* the zkVM and returns the
-//! committed 144-byte public-values slice (`prev_root ‖ new_root ‖
-//! withdrawals_root ‖ matcher_key ‖ batch_seq_le ‖ expiry_height_le`); we check
-//! it matches. The batch includes an **authenticated trade** (maker + taker +
-//! matcher signatures), so the guest re-verifies three ed25519 signatures —
-//! accelerated by SP1's curve25519 precompile. `--prove` produces a real SP1
-//! proof of that execution.
+//!   cargo run -p clearing-script --release --locked          # execute only
+//!   SP1_ALLOW_PROVE=1 ./target/release/clearing-host --prove # CORE proof
+//!
+//! `--groth16` is not a test. It wraps the whole SP1 recursion circuit (~20 min,
+//! tens of GB) and needs `SP1_ALLOW_GROTH16=1` plus an already-built binary.
 
 use clearing::auth::{Ed25519PubKey, Ed25519Signature, Order, Side, SignedOrder, TradeAuth};
 use clearing::commitment::{
-    encode_matcher_msg, encode_order, order_id, pack_public_values, withdrawals_root,
+    encode_matcher_msg, encode_order, order_id, pack_public_values, withdrawals_root, DEPTH,
     PUBLIC_VALUES_LEN,
 };
 use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
@@ -35,7 +27,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use sp1_sdk::{
     blocking::{ProveRequest as _, Prover as _, ProverClient},
-    include_elf, Elf, HashableKey, ProvingKey as _, SP1Stdin,
+    include_elf, Elf, HashableKey, ProvingKey as _, SP1ProofWithPublicValues, SP1Stdin,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -217,10 +209,6 @@ fn arg_value(flag: &str) -> Option<String> {
     None
 }
 
-fn default_dump_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clearing-solana/fixtures/sp1")
-}
-
 fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
@@ -232,7 +220,7 @@ fn find_groth16_vk(prefix: &[u8; 4]) -> Option<(PathBuf, Vec<u8>)> {
     }
     if let Some(home) = std::env::var_os("HOME") {
         let root = PathBuf::from(home).join(".sp1/circuits");
-        if let Ok(walk) = std::fs::read_dir(&root) {
+        if root.is_dir() {
             fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
                 let Ok(rd) = std::fs::read_dir(dir) else {
                     return;
@@ -260,27 +248,53 @@ fn find_groth16_vk(prefix: &[u8; 4]) -> Option<(PathBuf, Vec<u8>)> {
     None
 }
 
+/// SP1 6 on-chain wrap bytes, TEE prefix stripped if present.
+///
+/// Observed layout (356 bytes): `SHA256(gnark_vk)[0..4]` ‖ exit(32) ‖ vk_root(32)
+/// ‖ proof_nonce(32) ‖ A‖B‖C (256). Older docs assumed 260 (prefix + ABC only).
+fn onchain_groth16_bytes(proof: &SP1ProofWithPublicValues) -> Vec<u8> {
+    let mut bytes = proof.bytes();
+    if let Some(tee) = &proof.tee_proof {
+        assert!(
+            bytes.starts_with(tee.as_slice()),
+            "proof.bytes() should start with tee_proof"
+        );
+        bytes = bytes[tee.len()..].to_vec();
+    }
+    bytes
+}
+
 fn dump_wrap_artifacts(
     dir: &Path,
-    proof_bytes: &[u8],
+    proof: &SP1ProofWithPublicValues,
     public_values: &[u8],
     guest_vk_hash: &[u8; 32],
 ) {
-    assert_eq!(
+    std::fs::create_dir_all(dir).expect("create dump dir");
+    proof
+        .save(dir.join("sp1_proof.bin"))
+        .expect("write sp1_proof.bin");
+    let raw = proof.bytes();
+    std::fs::write(dir.join("proof.raw.bin"), &raw).expect("write proof.raw.bin");
+    let proof_bytes = onchain_groth16_bytes(proof);
+    assert!(
+        proof_bytes.len() >= 4,
+        "wrap proof too short: {} (raw {})",
         proof_bytes.len(),
-        260,
-        "Groth16 wrap proof must be 260 bytes (4-byte gnark vk prefix + A||B||C); got {}",
-        proof_bytes.len()
+        raw.len()
     );
     assert_eq!(public_values.len(), PUBLIC_VALUES_LEN);
-    std::fs::create_dir_all(dir).expect("create dump dir");
-    std::fs::write(dir.join("proof.bin"), proof_bytes).expect("write proof.bin");
+    std::fs::write(dir.join("proof.bin"), &proof_bytes).expect("write proof.bin");
     std::fs::write(dir.join("public_values.bin"), public_values).expect("write public_values.bin");
     std::fs::write(dir.join("guest_vk_hash.bin"), guest_vk_hash).expect("write guest_vk_hash.bin");
 
     let prefix: [u8; 4] = proof_bytes[..4].try_into().unwrap();
     let mut meta = String::new();
     meta.push_str(&format!("proof_len={}\n", proof_bytes.len()));
+    meta.push_str(&format!("proof_raw_len={}\n", raw.len()));
+    if let Some(tee) = &proof.tee_proof {
+        meta.push_str(&format!("tee_proof_len={}\n", tee.len()));
+    }
     meta.push_str(&format!("sp1-sdk=6.0.1 (lock may resolve newer)\n"));
     meta.push_str(&format!(
         "groth16_vk_hash_prefix={}\n",
@@ -312,17 +326,34 @@ fn dump_wrap_artifacts(
     println!("dumped wrap artifacts to {}", dir.display());
 }
 
+fn cap_threads() {
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        std::env::set_var("RAYON_NUM_THREADS", "2");
+    }
+}
+
+fn require_allow(flag: &str, env_name: &str) {
+    if std::env::var(env_name).ok().as_deref() != Some("1") {
+        eprintln!(
+            "refusing {flag}: this path pins tens of GB of RAM (SP1 setup / gnark wrap).\n\
+             Re-run with {env_name}=1 RAYON_NUM_THREADS=2, and prefer an already-built\n\
+             binary (`./target/release/clearing-host`) so cargo does not rebuild sp1-sdk."
+        );
+        std::process::exit(2);
+    }
+}
+
 fn main() {
+    cap_threads();
     sp1_sdk::utils::setup_logger();
     let do_groth16 = std::env::args().any(|a| a == "--groth16");
     let do_prove = do_groth16 || std::env::args().any(|a| a == "--prove");
-    let dump_dir = arg_value("--dump-dir").map(PathBuf::from).or_else(|| {
-        if do_groth16 {
-            Some(default_dump_dir())
-        } else {
-            None
-        }
-    });
+    if do_groth16 {
+        require_allow("--groth16", "SP1_ALLOW_GROTH16");
+    } else if do_prove {
+        require_allow("--prove", "SP1_ALLOW_PROVE");
+    }
+    let dump_dir = arg_value("--dump-dir").map(PathBuf::from);
 
     // Number of trades in the batch (default 1). Set TRADES=100 to measure how
     // cycles scale with trade count.
@@ -330,6 +361,12 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    if n_trades > 4 && std::env::var("SP1_ALLOW_HEAVY").ok().as_deref() != Some("1") {
+        eprintln!(
+            "refusing TRADES={n_trades}: cap is 4 on a laptop. Set SP1_ALLOW_HEAVY=1 to override."
+        );
+        std::process::exit(2);
+    }
 
     let (witness, matcher_key, expiry_height, batch_seq) = build_witness(n_trades);
     // The trades must have applied (authenticated swaps), so the batch is not a
@@ -355,7 +392,7 @@ fn main() {
     let exec_time = t_exec.elapsed();
     let cycles = report.total_instruction_count();
     println!(
-        "executed in zkVM: {cycles} cycles in {exec_time:.2?}  ({n_trades} trade(s), {} ed25519 sigs, {:.0} cycles/trade)",
+        "executed in zkVM: {cycles} cycles in {exec_time:.2?}  (tree depth {DEPTH}, {n_trades} trade(s), {} ed25519 sigs, {:.0} cycles/trade)",
         3 * n_trades,
         cycles as f64 / n_trades as f64,
     );
@@ -420,7 +457,7 @@ fn main() {
         if do_groth16 {
             if let Some(dir) = dump_dir.as_ref() {
                 let guest_vk_hash = pk.verifying_key().bytes32_raw();
-                dump_wrap_artifacts(dir, &proof.bytes(), pv, &guest_vk_hash);
+                dump_wrap_artifacts(dir, &proof, pv, &guest_vk_hash);
             }
         }
     }

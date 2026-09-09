@@ -1,0 +1,9 @@
+# Cap rustc parallelism. Unbounded `cargo run --release` of this workspace
+# (sp1-sdk + gnark-ffi) will pin tens of GB of RAM.
+[build]
+jobs = 2
+
+# Shallow Merkle tree for guest execute and CORE prove. Native `clearing` and
+# the Solana program keep the default 128.
+[env]
+CLEARING_TREE_DEPTH = "8"

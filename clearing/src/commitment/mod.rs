@@ -8,16 +8,17 @@
 //!
 //! ## Why a sparse Merkle tree
 //!
-//! Keying by the account's 128-bit UUID gives a fixed-depth (128) tree where
-//! every empty subtree collapses to a precomputed default hash, so only
-//! non-empty nodes are stored. Two properties matter:
+//! Keying by the account UUID gives a fixed-depth tree ([`DEPTH`]; 128 unless
+//! `CLEARING_TREE_DEPTH` is set at compile time) where every empty subtree
+//! collapses to a precomputed default hash, so only non-empty nodes are stored.
+//! Two properties matter:
 //!
 //! - **Canonical:** an empty account and an absent account hash identically
 //!   (the [`crate::account::Account`] prunes zero balances, and the state
 //!   machine prunes empty accounts), so the root depends only on real holdings,
 //!   never on history.
-//! - **Incremental:** a changed account re-hashes only the 128 nodes on its
-//!   root-to-leaf path, driven by [`crate::state::StateDelta`]. The
+//! - **Incremental:** a changed account re-hashes only the [`DEPTH`] nodes on
+//!   its root-to-leaf path, driven by [`crate::state::StateDelta`]. The
 //!   `from_state` rebuild is the cross-check.
 
 pub mod hash_plain;
@@ -34,9 +35,41 @@ use crate::state::{State, StateDelta};
 /// A 32-byte commitment hash.
 pub type Hash = [u8; 32];
 
-/// Depth of the tree = bits in an [`AccountId`] (UUID is 128-bit). Level 0 is
-/// the root; level `DEPTH` holds the leaves.
-const DEPTH: u8 = 128;
+/// Depth of the tree. Level 0 is the root; level `DEPTH` holds the leaves.
+///
+/// Set at compile time by `CLEARING_TREE_DEPTH` (default 128). The zkVM
+/// workspace pins this to 8 so execute/prove tests hash ~16× less per update.
+/// Below 128, only the low `DEPTH` bits of the account id are in the path:
+/// `0xB` vs `0x5` is fine; `0xB` vs `0x10B` collides at depth 8.
+pub const DEPTH: u8 = parse_u8(env!("CLEARING_TREE_DEPTH"));
+
+const fn parse_u8(s: &str) -> u8 {
+    let b = s.as_bytes();
+    assert!(!b.is_empty(), "CLEARING_TREE_DEPTH must not be empty");
+    let mut n = 0u8;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(
+            b[i] >= b'0' && b[i] <= b'9',
+            "CLEARING_TREE_DEPTH must be decimal"
+        );
+        n = n * 10 + (b[i] - b'0');
+        i += 1;
+    }
+    n
+}
+
+const _: () = assert!(DEPTH >= 1 && DEPTH <= 128);
+
+/// Leaf index in the tree: the low [`DEPTH`] bits of the account UUID.
+/// At 128 this is the full id (`1 << 128` is not representable as `u128`).
+#[inline]
+fn tree_index(account_key: u128) -> u128 {
+    match DEPTH {
+        128 => account_key,
+        d => account_key & ((1u128 << d) - 1),
+    }
+}
 
 /// Canonical account-leaf encoding version. Bump on any layout change so a
 /// stale encoding can never silently produce a matching root.
@@ -391,7 +424,7 @@ pub fn root_from_path<H: Hasher>(
     siblings: &[Hash],
 ) -> Hash {
     let mut node = leaf;
-    let mut index = key;
+    let mut index = tree_index(key);
     let mut next = 0;
     for step in 0..DEPTH {
         let level = (DEPTH - step) as usize; // tree level of this step's sibling
@@ -529,7 +562,7 @@ impl<H: Hasher> StateTree<H> {
         let mut mask = 0u128;
         let mut siblings = Vec::new();
         let mut level = DEPTH;
-        let mut index = id.0.as_u128();
+        let mut index = tree_index(id.0.as_u128());
         let mut step = 0;
         while level > 0 {
             let sib = self.get_node(level, index ^ 1);
@@ -553,15 +586,16 @@ impl<H: Hasher> StateTree<H> {
     /// previous leaf hash plus the sibling path (leaf → root) captured at write
     /// time.
     fn write_leaf(&mut self, key: u128, new_leaf: Hash) -> (Hash, u128, Vec<Hash>) {
-        let prev_leaf = self.get_node(DEPTH, key);
-        self.set_node(DEPTH, key, new_leaf);
+        let index0 = tree_index(key);
+        let prev_leaf = self.get_node(DEPTH, index0);
+        self.set_node(DEPTH, index0, new_leaf);
 
         // Capture the path sparsely: record only siblings that differ from the
         // level default, with a bitmask of which steps are present.
         let mut mask = 0u128;
         let mut siblings = Vec::new();
         let mut level = DEPTH;
-        let mut index = key;
+        let mut index = index0;
         let mut step = 0;
         while level > 0 {
             let sib = self.get_node(level, index ^ 1);
@@ -642,6 +676,43 @@ mod tests {
     fn empty_tree_root_is_default() {
         let t = StateTree::new(Sha256Hasher);
         assert_eq!(t.root(), t.defaults[0]);
+        assert_eq!(t.defaults.len(), DEPTH as usize + 1);
+    }
+
+    #[test]
+    fn ids_that_agree_on_low_depth_bits_share_a_slot() {
+        if DEPTH >= 128 {
+            return;
+        }
+        let a = acct(0x0B);
+        let b = acct(0x0B | (1u128 << DEPTH));
+        let mut sa = state_with_market();
+        sa.apply(&Tx::Deposit {
+            account: a,
+            asset: USDC,
+            amount: Amount(100),
+            nonce: 0,
+            owner: owner(1),
+            trading_key: None,
+        })
+        .unwrap();
+        let mut sb = state_with_market();
+        sb.apply(&Tx::Deposit {
+            account: b,
+            asset: USDC,
+            amount: Amount(100),
+            nonce: 0,
+            owner: owner(1),
+            trading_key: None,
+        })
+        .unwrap();
+        let ta = StateTree::from_state(Sha256Hasher, &sa);
+        let tb = StateTree::from_state(Sha256Hasher, &sb);
+        assert_eq!(
+            ta.root(),
+            tb.root(),
+            "account ids that match on the low {DEPTH} bits occupy one leaf slot"
+        );
     }
 
     #[test]
