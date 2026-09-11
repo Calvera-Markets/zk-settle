@@ -175,8 +175,10 @@ impl DepositIxBytes {
     }
 }
 
-/// SP1 wrap proof length (`SHA256(gnark_vk)[..4] ‖ A ‖ B ‖ C`). v1 mock-proof may be zeros.
-pub const SETTLE_PROOF_LEN: usize = 260;
+/// SP1 6 wrap proof length. v1 mock-proof may be zeros.
+///
+/// `SHA256(gnark_vk)[0..4] ‖ exit(32) ‖ vk_root(32) ‖ proof_nonce(32) ‖ A‖B‖C (256)`.
+pub const SETTLE_PROOF_LEN: usize = 356;
 pub const PUBLIC_VALUES_LEN: usize = 144;
 pub const DA_HASH_LEN: usize = 32;
 
