@@ -1556,3 +1556,59 @@ fn rotate_vk_updates_config_fields() {
     assert_eq!(cfg.groth16_vk_hash_prefix, [1, 2, 3, 4]);
     assert_eq!(cfg.proof_version, 1);
 }
+
+/// proof_version=1 always pairs. Zeros fail the gnark-vk prefix check.
+#[test]
+fn settle_wrap_rejects_junk_when_proof_version_is_1() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+
+    let mut vk_data = vec![0u8; 452 + 3 * 64];
+    vk_data[0..4].copy_from_slice(&2u32.to_le_bytes());
+    let new_vk = Pubkey::new_from_array([0xEEu8; 32]);
+    write_account(&mut svm, new_vk, PROGRAM_ID, vk_data);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(new_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0x11u8; 32],
+                groth16_vk_hash_prefix: [1, 2, 3, 4],
+                proof_version: 1,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+
+    let cfg = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    let err = send_custom_err(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix(
+            admin.pubkey(),
+            new_vk,
+            0,
+            cfg.root,
+            [0xAAu8; 32],
+            [0xBBu8; 32],
+            cfg.matcher_key,
+        )],
+    );
+    assert_eq!(err, ClearingError::InvalidProof as u32);
+    let after = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(after.root, cfg.root);
+    assert_eq!(after.batch_seq, 0);
+}
