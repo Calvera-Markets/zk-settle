@@ -292,6 +292,8 @@ fn dump_wrap_artifacts(
     let mut meta = String::new();
     meta.push_str(&format!("proof_len={}\n", proof_bytes.len()));
     meta.push_str(&format!("proof_raw_len={}\n", raw.len()));
+    meta.push_str(&format!("tree_depth={DEPTH}\n"));
+    meta.push_str("layout=4_vk_prefix+32_exit+32_vk_root+32_nonce+256_ABC\n");
     if let Some(tee) = &proof.tee_proof {
         meta.push_str(&format!("tee_proof_len={}\n", tee.len()));
     }
