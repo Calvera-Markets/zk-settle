@@ -26,7 +26,7 @@ use clearing::commitment::hash_poseidon2::Poseidon2Hasher as H;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use sp1_sdk::{
-    blocking::{ProveRequest as _, Prover as _, ProverClient},
+    blocking::{EnvProver, ProveRequest as _, Prover as _, ProverClient},
     include_elf, Elf, HashableKey, ProvingKey as _, SP1ProofWithPublicValues, SP1Stdin,
 };
 use std::path::{Path, PathBuf};
@@ -328,6 +328,11 @@ fn dump_wrap_artifacts(
     println!("dumped wrap artifacts to {}", dir.display());
 }
 
+fn execute_guest(client: &EnvProver, stdin: SP1Stdin) -> (Vec<u8>, u64) {
+    let (public, report) = client.execute(ELF, stdin).run().expect("execute failed");
+    (public.as_slice().to_vec(), report.total_instruction_count())
+}
+
 fn cap_threads() {
     if std::env::var_os("RAYON_NUM_THREADS").is_none() {
         std::env::set_var("RAYON_NUM_THREADS", "2");
@@ -390,9 +395,8 @@ fn main() {
     // Execute: run the guest in the zkVM, get the committed public outputs.
     let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
     let t_exec = std::time::Instant::now();
-    let (public, report) = client.execute(ELF, stdin).run().expect("execute failed");
+    let (public, cycles) = execute_guest(&client, stdin);
     let exec_time = t_exec.elapsed();
-    let cycles = report.total_instruction_count();
     println!(
         "executed in zkVM: {cycles} cycles in {exec_time:.2?}  (tree depth {DEPTH}, {n_trades} trade(s), {} ed25519 sigs, {:.0} cycles/trade)",
         3 * n_trades,
@@ -477,6 +481,30 @@ mod tests {
         let mut out: [u8; 32] = Sha256::digest(public_values).into();
         out[0] &= 0x1F;
         out
+    }
+
+    #[test]
+    fn zkvm_compiles_shallow_tree() {
+        assert_eq!(
+            DEPTH, 8,
+            "clearing-zkvm must compile clearing at CLEARING_TREE_DEPTH=8"
+        );
+    }
+
+    #[test]
+    fn execute_guest_matches_host_public_values() {
+        // Debug SP1 execute takes minutes; this is the release test loop.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        cap_threads();
+        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+        let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+        let client = ProverClient::from_env();
+        let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
+        let (pv, cycles) = execute_guest(&client, stdin);
+        eprintln!("execute_guest: {cycles} cycles at DEPTH={DEPTH}");
+        assert_eq!(pv.as_slice(), expected.as_slice());
     }
 
     #[test]

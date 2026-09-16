@@ -1,0 +1,2 @@
+# Optional wrap dump. kat_sp1 skips if proof.bin is missing.
+*.bin
