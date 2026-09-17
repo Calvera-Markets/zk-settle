@@ -508,6 +508,30 @@ mod tests {
     }
 
     #[test]
+    fn prove_guest_core_verifies() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        cap_threads();
+        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+        let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+        let client = ProverClient::from_env();
+        let pk = client.setup(ELF).expect("setup");
+        let proof = client
+            .prove(
+                &pk,
+                write_stdin(&witness, &matcher_key, batch_seq, expiry_height),
+            )
+            .run()
+            .expect("core prove");
+        client
+            .verify(&proof, pk.verifying_key(), None)
+            .expect("core verify");
+        assert_eq!(proof.public_values.as_slice(), expected.as_slice());
+        eprintln!("core prove+verify ok at DEPTH={DEPTH}");
+    }
+
+    #[test]
     fn packed_public_values_are_144_bytes_and_seq_is_not_expiry() {
         let prev = [0x11u8; 32];
         let new = [0x22u8; 32];
