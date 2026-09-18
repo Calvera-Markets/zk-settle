@@ -219,11 +219,28 @@ fn is_less_than_fr_modulus(bytes: &[u8; FR_LEN]) -> bool {
     *bytes < FR_MODULUS_BE
 }
 
+/// SP1 6 wrap public inputs: guest vk hash, SHA-256 digest of guest PV,
+/// then `exit ‖ vk_root ‖ proof_nonce` from the 96-byte proof header.
+pub const WRAP_NR_PUBINPUTS: u32 = 5;
+
+pub fn wrap_public_inputs(
+    guest_vk_hash: &[u8; 32],
+    public_values: &[u8],
+    proof: &[u8; WRAP_PROOF_LEN],
+) -> [[u8; FR_LEN]; WRAP_NR_PUBINPUTS as usize] {
+    let digest = hash_public_inputs(public_values);
+    let mut exit = [0u8; FR_LEN];
+    let mut vk_root = [0u8; FR_LEN];
+    let mut nonce = [0u8; FR_LEN];
+    exit.copy_from_slice(&proof[WRAP_PREFIX_LEN..WRAP_PREFIX_LEN + 32]);
+    vk_root.copy_from_slice(&proof[WRAP_PREFIX_LEN + 32..WRAP_PREFIX_LEN + 64]);
+    nonce.copy_from_slice(&proof[WRAP_PREFIX_LEN + 64..WRAP_ABC_OFF]);
+    [*guest_vk_hash, digest, exit, vk_root, nonce]
+}
+
 /// Verify an SP1 Groth16 wrap proof (`proof_version = 1`).
 ///
-/// Outer inputs are `(guest_vk_hash, hash_public_inputs(public_values))` as two
-/// BE scalars. Always negates A. `vk_account_data` is the decompressed wrap VK
-/// (`nr_pubinputs == 2`).
+/// Five BE scalars (SP1 6). Always negates A. VK `nr_pubinputs` must be 5.
 pub fn verify_sp1_wrap(
     vk_account_data: &[u8],
     guest_vk_hash: &[u8; 32],
@@ -233,21 +250,15 @@ pub fn verify_sp1_wrap(
 ) -> Result<(), ClearingError> {
     let parsed = parse_wrap_proof(proof, groth16_vk_hash_prefix)?;
     let a_neg = negate_g1(&parsed.a);
-    let outer = groth16_public_values(guest_vk_hash, public_values);
-    let input0: [u8; FR_LEN] = outer[0..FR_LEN]
-        .try_into()
-        .map_err(|_| ClearingError::InvalidProof)?;
-    let input1: [u8; FR_LEN] = outer[FR_LEN..]
-        .try_into()
-        .map_err(|_| ClearingError::InvalidProof)?;
-    if !is_less_than_fr_modulus(&input0) || !is_less_than_fr_modulus(&input1) {
+    let inputs = wrap_public_inputs(guest_vk_hash, public_values, proof);
+    if inputs.iter().any(|i| !is_less_than_fr_modulus(i)) {
         return Err(ClearingError::InvalidProof);
     }
     let vk = parse_vk(vk_account_data)?;
-    if vk.nr_pubinputs != 2 {
+    if vk.nr_pubinputs != WRAP_NR_PUBINPUTS {
         return Err(ClearingError::InvalidProof);
     }
-    pairing_verify(&a_neg, &parsed.b, &parsed.c, &[input0, input1], &vk)
+    pairing_verify(&a_neg, &parsed.b, &parsed.c, &inputs, &vk)
 }
 
 /// Verify a 256-byte circuits-wire proof against a VK account. Always negates A.

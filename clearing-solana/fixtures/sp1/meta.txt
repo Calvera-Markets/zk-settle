@@ -1,0 +1,9 @@
+proof_len=356
+proof_raw_len=356
+tree_depth=8
+layout=4_vk_prefix+32_exit+32_vk_root+32_nonce+256_ABC
+sp1-sdk=6.0.1 (lock may resolve newer)
+groth16_vk_hash_prefix=4388a21c
+groth16_vk_path=/Users/boavida/.sp1/circuits/groth16/v6.1.0/groth16_vk.bin
+groth16_vk_sha256=4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696
+GROTH16_VK_match=prefix of SHA256(gnark_vk.bin) == proof[0..4]

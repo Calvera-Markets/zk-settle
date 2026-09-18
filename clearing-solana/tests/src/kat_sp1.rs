@@ -61,16 +61,18 @@ fn load_wrap_fixture() -> Option<WrapFixture> {
     let mut guest_vk_hash = [0u8; 32];
     guest_vk_hash.copy_from_slice(&hash_vec);
 
-    let vk_account = fs::read(dir.join("vk_account.bin"))
-        .ok()
-        .or_else(|| fs::read(dir.join("groth16_vk.bin")).ok())?;
-    if vk_account.len() < 452 + 64 * 3 {
+    let vk_account = fs::read(dir.join("vk_account.bin")).ok().or_else(|| {
+        let gnark = fs::read(dir.join("groth16_vk.bin")).ok()?;
+        crate::gnark_vk::gnark_vk_to_account(&gnark)
+    })?;
+    if vk_account.len() < 452 + 64 * 6 {
         eprintln!(
-            "skip kat_sp1: vk account too short ({} bytes); need groth16-solana layout",
+            "skip kat_sp1: vk account too short ({} bytes); need nr_pubinputs=5",
             vk_account.len()
         );
         return None;
     }
+    let _ = fs::write(dir.join("vk_account.bin"), &vk_account);
 
     let mut prefix = [0u8; 4];
     prefix.copy_from_slice(&proof[0..4]);
@@ -205,6 +207,7 @@ fn kat_sp1_wrap_known_answer() {
         &payer,
         settle_ix(payer.pubkey(), vk, fix.proof, fix.public_values),
     );
+    eprintln!("kat_sp1 wrap settle: {cu} CU");
     assert!(
         cu <= 400_000,
         "wrap settle {cu} CU exceeds 400k (redesign if > 600k)"

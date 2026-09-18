@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod differential;
 #[cfg(test)]
+mod gnark_vk;
+#[cfg(test)]
 mod kat_digest;
 #[cfg(test)]
 mod kat_groth16;
