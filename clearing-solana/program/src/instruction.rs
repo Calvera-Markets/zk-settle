@@ -12,6 +12,10 @@ pub const ROTATE_VK: u8 = 8;
 /// KAT-only plain Groth16 verify (no funds, no root). Settle will reuse `verifier`.
 pub const VERIFY_PLAIN: u8 = 9;
 
+/// `Config.proof_version`. One deployment is one mode.
+pub const PROOF_VERSION_SP1: u8 = 1;
+pub const PROOF_VERSION_CIRCUITS: u8 = 2;
+
 /// `initialize` (disc = 0) instruction data after the discriminator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InitializeArgs {
@@ -380,8 +384,10 @@ impl ClaimArgs {
             return Err(ProgramError::InvalidInstructionData);
         }
         let n_siblings = data[24];
+        let rest_len = data.len() - Self::HEADER_LEN;
+        let groth16 = n_siblings == 0 && rest_len == 256;
         let sib_len = n_siblings as usize * 32;
-        if data.len() != Self::HEADER_LEN + sib_len {
+        if !groth16 && data.len() != Self::HEADER_LEN + sib_len {
             return Err(ProgramError::InvalidInstructionData);
         }
         let mut seq = [0u8; 8];

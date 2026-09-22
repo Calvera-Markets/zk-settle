@@ -118,16 +118,36 @@ fn verify_or_skip_proof(
     if skip_pairing(cfg.proof_version) {
         return Ok(());
     }
-    if cfg.proof_version != 1 {
-        return Err(ClearingError::InvalidProof);
+    match cfg.proof_version {
+        crate::instruction::PROOF_VERSION_SP1 => crate::verifier::verify_sp1_wrap(
+            vk_account_data,
+            &cfg.guest_vk_hash,
+            &cfg.groth16_vk_hash_prefix,
+            &args.proof,
+            &args.public_values,
+        ),
+        crate::instruction::PROOF_VERSION_CIRCUITS => {
+            let proof: [u8; crate::verifier::PROOF_LEN] = args.proof[..crate::verifier::PROOF_LEN]
+                .try_into()
+                .map_err(|_| ClearingError::InvalidProof)?;
+            if args.proof[crate::verifier::PROOF_LEN..]
+                .iter()
+                .any(|&b| b != 0)
+            {
+                return Err(ClearingError::InvalidProof);
+            }
+            let pv = args.public_values();
+            let vk = crate::verifier::parse_vk(vk_account_data)?;
+            let (inputs, n) = crate::verifier::circuits_settle_public_inputs(
+                &pv.prev_root,
+                &pv.new_root,
+                &pv.withdrawals_root,
+                vk.nr_pubinputs,
+            )?;
+            crate::verifier::verify_plain(vk_account_data, &proof, &inputs[..n])
+        }
+        _ => Err(ClearingError::InvalidProof),
     }
-    crate::verifier::verify_sp1_wrap(
-        vk_account_data,
-        &cfg.guest_vk_hash,
-        &cfg.groth16_vk_hash_prefix,
-        &args.proof,
-        &args.public_values,
-    )
 }
 
 fn skip_pairing(proof_version: u8) -> bool {

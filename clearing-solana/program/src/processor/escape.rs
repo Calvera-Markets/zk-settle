@@ -89,27 +89,57 @@ pub fn process(
     token::require_user_ata(owner_ata, mint.address(), owner.address())?;
 
     let proof_data = proof_buffer.try_borrow()?;
-    let (sibling_mask, siblings, leaf_bytes) = parse_proof_buffer(&proof_data)?;
+    let (l1_owner, amount) = if cfg.proof_version == crate::instruction::PROOF_VERSION_CIRCUITS {
+        let vk_account = accounts.get(11).ok_or(ProgramError::NotEnoughAccountKeys)?;
+        if vk_account.address().as_array() != &cfg.vk_account {
+            return Err(ClearingError::InvalidAccount.into());
+        }
+        // `[amount_u64_le][256-byte groth16]`
+        if proof_data.len() != 8 + crate::verifier::PROOF_LEN {
+            return Err(ClearingError::InvalidProofBuffer.into());
+        }
+        let mut amt_le = [0u8; 8];
+        amt_le.copy_from_slice(&proof_data[0..8]);
+        let amount = u64::from_le_bytes(amt_le);
+        if amount == 0 {
+            return Err(ClearingError::NonPositiveQuantity.into());
+        }
+        let proof: [u8; crate::verifier::PROOF_LEN] = proof_data[8..]
+            .try_into()
+            .map_err(|_| ClearingError::InvalidProofBuffer)?;
+        let owner_bytes = owner.address().to_bytes();
+        let inputs = [
+            cfg.root,
+            owner_bytes,
+            crate::verifier::u32_be32(args.asset_id),
+            crate::verifier::u64_be32(amount),
+        ];
+        let vk_data = vk_account.try_borrow()?;
+        crate::verifier::verify_plain(&vk_data, &proof, &inputs)?;
+        (owner_bytes, amount)
+    } else {
+        let (sibling_mask, siblings, leaf_bytes) = parse_proof_buffer(&proof_data)?;
 
-    let leaf = hash::hash_leaf(leaf_bytes);
-    let key = u128::from_be_bytes(args.account_id);
-    let root = hash::root_from_path(key, leaf, sibling_mask, siblings);
-    if root != cfg.root {
-        return Err(ClearingError::InvalidProof.into());
-    }
+        let leaf = hash::hash_leaf(leaf_bytes);
+        let key = u128::from_be_bytes(args.account_id);
+        let root = hash::root_from_path(key, leaf, sibling_mask, siblings);
+        if root != cfg.root {
+            return Err(ClearingError::InvalidProof.into());
+        }
 
-    let decoded = decode_v4_leaf(leaf_bytes, args.asset_id)?;
-    let l1_owner = decoded.owner.ok_or(ClearingError::OwnerMismatch)?;
-    if &l1_owner != owner.address().as_array() {
-        return Err(ClearingError::OwnerMismatch.into());
-    }
-    if decoded.amount <= 0 {
-        return Err(ClearingError::NonPositiveQuantity.into());
-    }
-    if decoded.amount > u64::MAX as i128 {
-        return Err(ClearingError::Overflow.into());
-    }
-    let amount = decoded.amount as u64;
+        let decoded = decode_v4_leaf(leaf_bytes, args.asset_id)?;
+        let l1_owner = decoded.owner.ok_or(ClearingError::OwnerMismatch)?;
+        if &l1_owner != owner.address().as_array() {
+            return Err(ClearingError::OwnerMismatch.into());
+        }
+        if decoded.amount <= 0 {
+            return Err(ClearingError::NonPositiveQuantity.into());
+        }
+        if decoded.amount > u64::MAX as i128 {
+            return Err(ClearingError::Overflow.into());
+        }
+        (l1_owner, decoded.amount as u64)
+    };
 
     // Nullifier seeds use the leaf owner (equal to signer after the check).
     let (expected_nullifier, nullifier_bump) =

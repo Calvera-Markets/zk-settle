@@ -270,6 +270,81 @@ impl ConstraintSynthesizer<Fr> for MerkleInclusionCircuit {
     }
 }
 
+/// Poseidon leaf for a circuits-mode claim/escape opening:
+/// `Poseidon(owner, asset, amount)`.
+pub fn claim_open_leaf(owner: Fr, asset: Fr, amount: Fr) -> Fr {
+    poseidon_hash(&[owner, asset, amount])
+}
+
+/// Groth16 opening used by Solana `proof_version = 2` claim/escape.
+///
+/// Public inputs (in order): `root`, `owner`, `asset`, `amount`.
+/// Witness: Merkle path. Constrains `Poseidon(owner, asset, amount)` is in `root`.
+#[derive(Clone)]
+pub struct ClaimOpenCircuit {
+    pub root: Option<Fr>,
+    pub owner: Option<Fr>,
+    pub asset: Option<Fr>,
+    pub amount: Option<Fr>,
+    pub siblings: Vec<Option<Fr>>,
+    pub path_bits: Vec<Option<bool>>,
+}
+
+impl ClaimOpenCircuit {
+    pub fn blank() -> Self {
+        Self {
+            root: None,
+            owner: None,
+            asset: None,
+            amount: None,
+            siblings: vec![None; DEPTH],
+            path_bits: vec![None; DEPTH],
+        }
+    }
+
+    pub fn new(
+        root: Fr,
+        owner: Fr,
+        asset: Fr,
+        amount: Fr,
+        siblings: Vec<Fr>,
+        path_bits: Vec<bool>,
+    ) -> Self {
+        assert_eq!(siblings.len(), DEPTH);
+        assert_eq!(path_bits.len(), DEPTH);
+        Self {
+            root: Some(root),
+            owner: Some(owner),
+            asset: Some(asset),
+            amount: Some(amount),
+            siblings: siblings.into_iter().map(Some).collect(),
+            path_bits: path_bits.into_iter().map(Some).collect(),
+        }
+    }
+}
+
+impl ConstraintSynthesizer<Fr> for ClaimOpenCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let root = FpVar::new_input(cs.clone(), || {
+            self.root.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let owner = FpVar::new_input(cs.clone(), || {
+            self.owner.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let asset = FpVar::new_input(cs.clone(), || {
+            self.asset.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let amount = FpVar::new_input(cs.clone(), || {
+            self.amount.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let leaf = poseidon_hash_gadget(cs.clone(), &[owner, asset, amount])?;
+        let (sibs, bits) = alloc_path(cs, &self.siblings, &self.path_bits)?;
+        let computed = merkle_root_gadget(leaf, &sibs, &bits)?;
+        computed.enforce_equal(&root)?;
+        Ok(())
+    }
+}
+
 /// Slice 3 — a single-account, range-checked **withdrawal transition**.
 ///
 /// Proves: account `id` held `balance` in `prev_root`; withdrawing `withdraw`
@@ -1051,6 +1126,35 @@ mod tests {
 
         // A different claimed root must NOT verify against this proof.
         assert!(!Groth16::<Bn254>::verify(&vk, &[root + Fr::from(1u64)], &proof).unwrap());
+    }
+
+    #[test]
+    fn groth16_claim_open_proves_and_verifies() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let owner = Fr::from(1u64);
+        let asset = Fr::from(0u64);
+        let amount = Fr::from(100u64);
+        let leaf = crate::claim_open_leaf(owner, asset, amount);
+        let mut leaves: Vec<Fr> = (0..(1u64 << DEPTH)).map(Fr::from).collect();
+        leaves[0] = leaf;
+        let tree = MerkleTree::new(leaves);
+        let root = tree.root();
+        let (siblings, bits) = tree.path(0);
+        let (pk, vk) =
+            Groth16::<Bn254>::circuit_specific_setup(ClaimOpenCircuit::blank(), &mut rng).unwrap();
+        let proof = Groth16::<Bn254>::prove(
+            &pk,
+            ClaimOpenCircuit::new(root, owner, asset, amount, siblings, bits),
+            &mut rng,
+        )
+        .unwrap();
+        assert!(Groth16::<Bn254>::verify(&vk, &[root, owner, asset, amount], &proof).unwrap());
+        assert!(!Groth16::<Bn254>::verify(
+            &vk,
+            &[root, owner, asset, amount + Fr::from(1u64)],
+            &proof
+        )
+        .unwrap());
     }
 
     #[test]

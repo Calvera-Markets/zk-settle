@@ -261,6 +261,44 @@ pub fn verify_sp1_wrap(
     pairing_verify(&a_neg, &parsed.b, &parsed.c, &inputs, &vk)
 }
 
+/// Circuits-mode settle public inputs from the 144-byte pack.
+///
+/// `n == 2`: prev_root, new_root (`BatchTradeCircuit`).
+/// `n == 3`: also withdrawals_root.
+pub fn circuits_settle_public_inputs(
+    prev_root: &[u8; 32],
+    new_root: &[u8; 32],
+    withdrawals_root: &[u8; 32],
+    n: u32,
+) -> Result<([[u8; FR_LEN]; MAX_PUBLIC_INPUTS], usize), ClearingError> {
+    let mut inputs = [[0u8; FR_LEN]; MAX_PUBLIC_INPUTS];
+    match n {
+        2 => {
+            inputs[0] = *prev_root;
+            inputs[1] = *new_root;
+        }
+        3 => {
+            inputs[0] = *prev_root;
+            inputs[1] = *new_root;
+            inputs[2] = *withdrawals_root;
+        }
+        _ => return Err(ClearingError::InvalidProof),
+    }
+    Ok((inputs, n as usize))
+}
+
+pub fn u32_be32(x: u32) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&x.to_be_bytes());
+    out
+}
+
+pub fn u64_be32(x: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..32].copy_from_slice(&x.to_be_bytes());
+    out
+}
+
 /// Verify a 256-byte circuits-wire proof against a VK account. Always negates A.
 pub fn verify_plain(
     vk_account_data: &[u8],
@@ -581,6 +619,21 @@ mod tests {
             verify_sp1_wrap(&vk, &[0u8; 32], &[1, 2, 3, 4], &proof, &pv).unwrap_err(),
             ClearingError::InvalidProof
         );
+    }
+
+    #[test]
+    fn circuits_settle_public_inputs_two_and_three() {
+        let prev = [1u8; 32];
+        let new = [2u8; 32];
+        let w = [3u8; 32];
+        let (ins, n) = circuits_settle_public_inputs(&prev, &new, &w, 2).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(ins[0], prev);
+        assert_eq!(ins[1], new);
+        let (ins, n) = circuits_settle_public_inputs(&prev, &new, &w, 3).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(ins[2], w);
+        assert!(circuits_settle_public_inputs(&prev, &new, &w, 5).is_err());
     }
 
     #[test]

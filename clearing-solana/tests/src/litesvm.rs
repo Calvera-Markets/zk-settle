@@ -1612,3 +1612,55 @@ fn settle_wrap_rejects_junk_when_proof_version_is_1() {
     assert_eq!(after.root, cfg.root);
     assert_eq!(after.batch_seq, 0);
 }
+
+#[test]
+fn settle_circuits_rejects_junk_when_proof_version_is_2() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+
+    let mut vk_data = vec![0u8; 452 + 2 * 64];
+    vk_data[0..4].copy_from_slice(&1u32.to_le_bytes());
+    let new_vk = Pubkey::new_from_array([0xCCu8; 32]);
+    write_account(&mut svm, new_vk, PROGRAM_ID, vk_data);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(new_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0u8; 32],
+                groth16_vk_hash_prefix: [0; 4],
+                proof_version: 2,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+
+    let cfg = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    let err = send_custom_err(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix(
+            admin.pubkey(),
+            new_vk,
+            0,
+            cfg.root,
+            [0xAAu8; 32],
+            [0xBBu8; 32],
+            cfg.matcher_key,
+        )],
+    );
+    assert_eq!(err, ClearingError::InvalidProof as u32);
+}

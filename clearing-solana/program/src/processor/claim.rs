@@ -73,39 +73,54 @@ pub fn process(
         return Err(ClearingError::InvalidAccount.into());
     }
 
-    if sibling_bytes.len() != args.n_siblings as usize * 32 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    let mut siblings = [[0u8; 32]; 16];
-    if args.n_siblings as usize > 16 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    for i in 0..args.n_siblings as usize {
-        siblings[i].copy_from_slice(&sibling_bytes[i * 32..i * 32 + 32]);
-    }
-
     let owner = claimant.address().to_bytes();
     let mut amt_i128 = [0u8; 16];
     amt_i128[..8].copy_from_slice(&args.amount.to_le_bytes());
-    if !hash::verify_withdrawal(
-        &rec.withdrawals_root,
-        args.batch_seq,
-        args.index,
-        &owner,
-        args.asset_id,
-        &amt_i128,
-        &siblings[..args.n_siblings as usize],
-    ) {
-        return Err(ClearingError::InvalidProof.into());
+
+    if cfg.proof_version == crate::instruction::PROOF_VERSION_CIRCUITS {
+        let vk_account = accounts.get(11).ok_or(ProgramError::NotEnoughAccountKeys)?;
+        if vk_account.address().as_array() != &cfg.vk_account {
+            return Err(ClearingError::InvalidAccount.into());
+        }
+        if sibling_bytes.len() != crate::verifier::PROOF_LEN {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let proof: [u8; crate::verifier::PROOF_LEN] = sibling_bytes
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        let inputs = [
+            rec.withdrawals_root,
+            owner,
+            crate::verifier::u32_be32(args.asset_id),
+            crate::verifier::u64_be32(args.amount),
+        ];
+        let vk_data = vk_account.try_borrow()?;
+        crate::verifier::verify_plain(&vk_data, &proof, &inputs)?;
+    } else {
+        if sibling_bytes.len() != args.n_siblings as usize * 32 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let mut siblings = [[0u8; 32]; 16];
+        if args.n_siblings as usize > 16 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        for i in 0..args.n_siblings as usize {
+            siblings[i].copy_from_slice(&sibling_bytes[i * 32..i * 32 + 32]);
+        }
+        if !hash::verify_withdrawal(
+            &rec.withdrawals_root,
+            args.batch_seq,
+            args.index,
+            &owner,
+            args.asset_id,
+            &amt_i128,
+            &siblings[..args.n_siblings as usize],
+        ) {
+            return Err(ClearingError::InvalidProof.into());
+        }
     }
 
-    let leaf = hash::withdrawal_leaf(
-        args.batch_seq,
-        args.index,
-        &owner,
-        args.asset_id,
-        &amt_i128,
-    );
+    let leaf = hash::withdrawal_leaf(args.batch_seq, args.index, &owner, args.asset_id, &amt_i128);
     let (expected_nullifier, nullifier_bump) = pda::find_claim_nullifier(program_id, &leaf);
     if nullifier.address() != &expected_nullifier {
         return Err(ClearingError::InvalidPda.into());
