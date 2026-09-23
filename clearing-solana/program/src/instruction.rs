@@ -11,6 +11,7 @@ pub const SET_ADMIN: u8 = 7;
 pub const ROTATE_VK: u8 = 8;
 /// KAT-only plain Groth16 verify (no funds, no root). Settle will reuse `verifier`.
 pub const VERIFY_PLAIN: u8 = 9;
+pub const ROTATE_OPEN_VK: u8 = 10;
 
 /// `Config.proof_version`. One deployment is one mode.
 pub const PROOF_VERSION_SP1: u8 = 1;
@@ -477,4 +478,8 @@ impl RotateVkArgs {
         out[37] = self.proof_version;
         out
     }
+}
+
+pub fn pack_rotate_open_vk() -> [u8; 1] {
+    [ROTATE_OPEN_VK]
 }

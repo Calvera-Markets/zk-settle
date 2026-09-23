@@ -79,7 +79,7 @@ pub fn process(
 
     if cfg.proof_version == crate::instruction::PROOF_VERSION_CIRCUITS {
         let vk_account = accounts.get(11).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        if vk_account.address().as_array() != &cfg.vk_account {
+        if vk_account.address().as_array() != &cfg.open_vk_account {
             return Err(ClearingError::InvalidAccount.into());
         }
         if sibling_bytes.len() != crate::verifier::PROOF_LEN {

@@ -91,7 +91,7 @@ pub fn process(
     let proof_data = proof_buffer.try_borrow()?;
     let (l1_owner, amount) = if cfg.proof_version == crate::instruction::PROOF_VERSION_CIRCUITS {
         let vk_account = accounts.get(11).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        if vk_account.address().as_array() != &cfg.vk_account {
+        if vk_account.address().as_array() != &cfg.open_vk_account {
             return Err(ClearingError::InvalidAccount.into());
         }
         // `[amount_u64_le][256-byte groth16]`

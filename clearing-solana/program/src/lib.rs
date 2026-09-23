@@ -63,6 +63,12 @@ pub fn dispatch(
             processor::admin::rotate_vk(program_id, accounts, &args)
         }
         instruction::VERIFY_PLAIN => verifier::process(program_id, accounts, rest),
+        instruction::ROTATE_OPEN_VK => {
+            if !rest.is_empty() {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            processor::admin::rotate_open_vk(program_id, accounts)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

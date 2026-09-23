@@ -42,6 +42,7 @@ pub struct Config {
     pub matcher_key: [u8; 32],
     pub freeze_authority: [u8; 32],
     pub vk_account: [u8; 32],
+    pub open_vk_account: [u8; 32],
     pub guest_vk_hash: [u8; 32],
     pub batch_seq: u64,
     pub expiry_height: u64,
@@ -225,8 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn config_layout_is_240_and_8_aligned() {
-        assert_eq!(Config::LEN, 240);
+    fn config_layout_is_272_and_8_aligned() {
+        assert_eq!(Config::LEN, 272);
         assert_eq!(core::mem::align_of::<Config>(), 8);
     }
 

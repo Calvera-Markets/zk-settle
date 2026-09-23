@@ -67,6 +67,7 @@ pub fn process(
         matcher_key: args.matcher_key,
         freeze_authority: args.freeze_authority,
         vk_account: vk_account.address().to_bytes(),
+        open_vk_account: vk_account.address().to_bytes(),
         guest_vk_hash: args.guest_vk_hash,
         batch_seq: 0,
         expiry_height: 0,

@@ -61,3 +61,25 @@ pub fn rotate_vk(
     cfg.proof_version = args.proof_version;
     cfg.pack(&mut config.try_borrow_mut()?)
 }
+
+pub fn rotate_open_vk(program_id: &Address, accounts: &[AccountView]) -> ProgramResult {
+    let [admin, config, open_vk_account, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !admin.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if !config.is_writable() {
+        return Err(ClearingError::InvalidAccount.into());
+    }
+    let (expected, _) = pda::find_config(program_id);
+    if config.address() != &expected {
+        return Err(ClearingError::InvalidPda.into());
+    }
+    let mut cfg = Config::unpack(&config.try_borrow()?)?;
+    if admin.address().as_array() != &cfg.admin {
+        return Err(ClearingError::Unauthorized.into());
+    }
+    cfg.open_vk_account = open_vk_account.address().to_bytes();
+    cfg.pack(&mut config.try_borrow_mut()?)
+}
