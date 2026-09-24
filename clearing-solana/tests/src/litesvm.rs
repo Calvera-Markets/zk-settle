@@ -9,7 +9,9 @@ use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
 use clearing_circuits::tree::MerkleTree;
-use clearing_circuits::{solana as circuits_solana, ClaimOpenCircuit, DEPTH as CIRCUITS_DEPTH};
+use clearing_circuits::{
+    solana as circuits_solana, ClaimOpenCircuit, CommitRootsCircuit, DEPTH as CIRCUITS_DEPTH,
+};
 use clearing_solana_program::{
     error::ClearingError,
     instruction::{
@@ -1878,4 +1880,127 @@ fn claim_v2_pays_vault_once() {
         )],
     );
     assert_eq!(replay, ClearingError::AlreadyInitialized as u32);
+}
+
+fn prove_commit_roots(
+    prev: &[u8; 32],
+    new: &[u8; 32],
+    withdrawals: &[u8; 32],
+) -> (Vec<u8>, [u8; PROOF_LEN]) {
+    let mut rng = StdRng::seed_from_u64(5);
+    let prev_fr = Fr::from_be_bytes_mod_order(prev);
+    let new_fr = Fr::from_be_bytes_mod_order(new);
+    let w_fr = Fr::from_be_bytes_mod_order(withdrawals);
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(CommitRootsCircuit::blank(), &mut rng).unwrap();
+    let proof = Groth16::<Bn254>::prove(
+        &pk,
+        CommitRootsCircuit::new(prev_fr, new_fr, w_fr),
+        &mut rng,
+    )
+    .unwrap();
+    (
+        encode_vk_account(&circuits_solana::vk_to_bytes(&vk)).unwrap(),
+        circuits_solana::proof_to_bytes(&proof),
+    )
+}
+
+fn settle_ix_circuits(
+    admin: Pubkey,
+    vk_account: Pubkey,
+    batch_seq: u64,
+    prev_root: [u8; 32],
+    new_root: [u8; 32],
+    withdrawals_root: [u8; 32],
+    matcher_key: [u8; 32],
+    proof: &[u8; PROOF_LEN],
+) -> Instruction {
+    let mut wrap = [0u8; SETTLE_PROOF_LEN];
+    wrap[..PROOF_LEN].copy_from_slice(proof);
+    let (config, _) = pda::find_config(&PROGRAM_ID);
+    let (batch, _) = pda::find_batch(&PROGRAM_ID, &batch_seq.to_le_bytes());
+    let args = SettleArgs {
+        proof: wrap,
+        public_values: pack_public_values(
+            &prev_root,
+            &new_root,
+            &withdrawals_root,
+            &matcher_key,
+            batch_seq,
+            0,
+        ),
+        da_hash: [0xDDu8; 32],
+    };
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(admin, true),
+            AccountMeta::new(config, false),
+            AccountMeta::new_readonly(vk_account, false),
+            AccountMeta::new(batch, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+        ],
+        data: args.pack().to_vec(),
+    }
+}
+
+#[test]
+fn settle_v2_posts_withdrawals_root() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let config = initialize(&mut svm, &payer, admin.pubkey());
+    let genesis = [0x11u8; 32];
+    let w_root = [0x22u8; 32];
+    let (vk_data, proof) = prove_commit_roots(&genesis, &genesis, &w_root);
+    let settle_vk = Pubkey::new_from_array([0x51u8; 32]);
+    write_account(&mut svm, settle_vk, PROGRAM_ID, vk_data);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(settle_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0u8; 32],
+                groth16_vk_hash_prefix: [0; 4],
+                proof_version: PROOF_VERSION_CIRCUITS,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+    let matcher = init_args(admin.pubkey()).matcher_key;
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix_circuits(
+            admin.pubkey(),
+            settle_vk,
+            0,
+            genesis,
+            genesis,
+            w_root,
+            matcher,
+            &proof,
+        )],
+    );
+    let cfg = Config::unpack(&svm.get_account(&config).unwrap().data).unwrap();
+    assert_eq!(cfg.root, genesis);
+    assert_eq!(cfg.batch_seq, 1);
+    let rec = BatchRecord::unpack(
+        &svm.get_account(&pda::find_batch(&PROGRAM_ID, &0u64.to_le_bytes()).0)
+            .unwrap()
+            .data,
+    )
+    .unwrap();
+    assert_eq!(rec.withdrawals_root, w_root);
 }

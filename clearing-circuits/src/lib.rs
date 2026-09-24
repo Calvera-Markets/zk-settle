@@ -345,6 +345,50 @@ impl ConstraintSynthesizer<Fr> for ClaimOpenCircuit {
     }
 }
 
+/// Circuits-mode settle: public `prev_root`, `new_root`, `withdrawals_root`.
+/// Constrains `prev_root == new_root` (no-op batch that only posts withdrawals).
+#[derive(Clone)]
+pub struct CommitRootsCircuit {
+    pub prev_root: Option<Fr>,
+    pub new_root: Option<Fr>,
+    pub withdrawals_root: Option<Fr>,
+}
+
+impl CommitRootsCircuit {
+    pub fn blank() -> Self {
+        Self {
+            prev_root: None,
+            new_root: None,
+            withdrawals_root: None,
+        }
+    }
+
+    pub fn new(prev_root: Fr, new_root: Fr, withdrawals_root: Fr) -> Self {
+        Self {
+            prev_root: Some(prev_root),
+            new_root: Some(new_root),
+            withdrawals_root: Some(withdrawals_root),
+        }
+    }
+}
+
+impl ConstraintSynthesizer<Fr> for CommitRootsCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let prev = FpVar::new_input(cs.clone(), || {
+            self.prev_root.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let new = FpVar::new_input(cs.clone(), || {
+            self.new_root.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let _withdrawals = FpVar::new_input(cs, || {
+            self.withdrawals_root
+                .ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        prev.enforce_equal(&new)?;
+        Ok(())
+    }
+}
+
 /// Slice 3 — a single-account, range-checked **withdrawal transition**.
 ///
 /// Proves: account `id` held `balance` in `prev_root`; withdrawing `withdraw`
@@ -1155,6 +1199,24 @@ mod tests {
             &proof
         )
         .unwrap());
+    }
+
+    #[test]
+    fn groth16_commit_roots_requires_prev_eq_new() {
+        let mut rng = StdRng::seed_from_u64(4);
+        let prev = Fr::from(7u64);
+        let w = Fr::from(9u64);
+        let (pk, vk) =
+            Groth16::<Bn254>::circuit_specific_setup(CommitRootsCircuit::blank(), &mut rng)
+                .unwrap();
+        let proof = Groth16::<Bn254>::prove(
+            &pk,
+            CommitRootsCircuit::new(prev, prev, w),
+            &mut rng,
+        )
+        .unwrap();
+        assert!(Groth16::<Bn254>::verify(&vk, &[prev, prev, w], &proof).unwrap());
+        assert!(!Groth16::<Bn254>::verify(&vk, &[prev, prev + Fr::from(1u64), w], &proof).unwrap());
     }
 
     #[test]
