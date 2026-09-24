@@ -3,15 +3,24 @@ use clearing::commitment::hash_plain::Sha256Hasher;
 use clearing::commitment::{canonical_encode, StateTree};
 use clearing::commitment::{withdrawal_proof, withdrawals_root};
 use clearing::id::{AccountId, Amount, AssetId, L1Address};
+use ark_bn254::{Bn254, Fr};
+use ark_ff::PrimeField;
+use ark_groth16::Groth16;
+use ark_snark::SNARK;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
+use clearing_circuits::tree::MerkleTree;
+use clearing_circuits::{solana as circuits_solana, ClaimOpenCircuit, DEPTH as CIRCUITS_DEPTH};
 use clearing_solana_program::{
     error::ClearingError,
     instruction::{
-        self, pack_public_values, ClaimArgs, DepositArgs, EscapeWithdrawArgs, InitializeArgs,
-        RegisterMintArgs, RotateVkArgs, SetAdminArgs, SettleArgs, SETTLE_PROOF_LEN,
+        self, pack_public_values, pack_rotate_open_vk, ClaimArgs, DepositArgs, EscapeWithdrawArgs,
+        InitializeArgs, RegisterMintArgs, RotateVkArgs, SetAdminArgs, SettleArgs,
+        PROOF_VERSION_CIRCUITS, SETTLE_PROOF_LEN,
     },
     pda,
     state::{AccountOwner, BatchRecord, Config, DepositReceipt, MintMeta, Nullifier},
     token::MAX_REGISTERED_MINTS,
+    verifier::{encode_vk_account, PROOF_LEN},
     ID as PROGRAM_ID,
 };
 use litesvm::LiteSVM;
@@ -1663,4 +1672,210 @@ fn settle_circuits_rejects_junk_when_proof_version_is_2() {
         )],
     );
     assert_eq!(err, ClearingError::InvalidProof as u32);
+}
+
+fn pubkey_lt_fr(pk: &Pubkey) -> bool {
+    pk.as_array().as_slice() < &FR_MODULUS_BE[..]
+}
+
+const FR_MODULUS_BE: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+fn user_in_fr() -> Keypair {
+    loop {
+        let k = Keypair::new();
+        if pubkey_lt_fr(&k.pubkey()) {
+            return k;
+        }
+    }
+}
+
+fn prove_claim_open_for(
+    owner: &[u8; 32],
+    asset: u32,
+    amount: u64,
+) -> (Vec<u8>, [u8; PROOF_LEN], [u8; 32]) {
+    let mut rng = StdRng::seed_from_u64(21);
+    let owner_fr = Fr::from_be_bytes_mod_order(owner);
+    let asset_fr = Fr::from(asset as u64);
+    let amount_fr = Fr::from(amount);
+    let leaf = clearing_circuits::claim_open_leaf(owner_fr, asset_fr, amount_fr);
+    let mut leaves: Vec<Fr> = (0..(1u64 << CIRCUITS_DEPTH)).map(Fr::from).collect();
+    leaves[0] = leaf;
+    let tree = MerkleTree::new(leaves);
+    let root = tree.root();
+    let (siblings, bits) = tree.path(0);
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(ClaimOpenCircuit::blank(), &mut rng).unwrap();
+    let proof = Groth16::<Bn254>::prove(
+        &pk,
+        ClaimOpenCircuit::new(root, owner_fr, asset_fr, amount_fr, siblings, bits),
+        &mut rng,
+    )
+    .unwrap();
+    (
+        encode_vk_account(&circuits_solana::vk_to_bytes(&vk)).unwrap(),
+        circuits_solana::proof_to_bytes(&proof),
+        circuits_solana::public_input_to_bytes(&root),
+    )
+}
+
+fn claim_ix_circuits(
+    claimant: Pubkey,
+    claimant_ata: Pubkey,
+    mint: Pubkey,
+    open_vk: Pubkey,
+    batch_seq: u64,
+    amount: u64,
+    proof: &[u8; PROOF_LEN],
+) -> Instruction {
+    let (config, _) = pda::find_config(&PROGRAM_ID);
+    let (mint_meta, _) = pda::find_mint_meta(&PROGRAM_ID, mint.as_array());
+    let (vault, _) = pda::find_vault(&PROGRAM_ID, mint.as_array());
+    let (batch, _) = pda::find_batch(&PROGRAM_ID, &batch_seq.to_le_bytes());
+    let (vault_authority, _) = pda::find_vault_authority(&PROGRAM_ID);
+    let owner = *claimant.as_array();
+    let amt = Amount(amount as i128).to_le_bytes();
+    let leaf = clearing_solana_program::hash::withdrawal_leaf(batch_seq, 0, &owner, 0, &amt);
+    let (nullifier, _) = pda::find_claim_nullifier(&PROGRAM_ID, &leaf);
+    let header = ClaimArgs {
+        batch_seq,
+        index: 0,
+        asset_id: 0,
+        amount,
+        n_siblings: 0,
+    }
+    .pack_header();
+    let mut data = header.to_vec();
+    data.extend_from_slice(proof);
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(claimant, true),
+            AccountMeta::new(claimant_ata, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(mint_meta, false),
+            AccountMeta::new_readonly(config, false),
+            AccountMeta::new_readonly(batch, false),
+            AccountMeta::new(nullifier, false),
+            AccountMeta::new_readonly(TOKEN_2022, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(open_vk, false),
+        ],
+        data,
+    }
+}
+
+#[test]
+fn claim_v2_pays_vault_once() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let amount = 1_000u64;
+    let (config, mint, vault) = funded_vault(&mut svm, &payer, &admin, amount);
+
+    let user = user_in_fr();
+    airdrop(&mut svm, &user.pubkey());
+    let ata = create_token_account(&mut svm, &payer, &mint.pubkey(), &user.pubkey());
+
+    let (open_vk_data, proof, w_root) =
+        prove_claim_open_for(user.pubkey().as_array(), 0, amount);
+    let open_vk = Pubkey::new_from_array([0x0Au8; 32]);
+    write_account(&mut svm, open_vk, PROGRAM_ID, open_vk_data);
+
+    let genesis = Config::unpack(&svm.get_account(&config).unwrap().data)
+        .unwrap()
+        .root;
+    let matcher = init_args(admin.pubkey()).matcher_key;
+    let settle_vk = Pubkey::new_from_array(VK_ACCOUNT);
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix(
+            admin.pubkey(),
+            settle_vk,
+            0,
+            genesis,
+            genesis,
+            w_root,
+            matcher,
+        )],
+    );
+
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(open_vk, false),
+            ],
+            data: pack_rotate_open_vk().to_vec(),
+        }],
+    );
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(settle_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0u8; 32],
+                groth16_vk_hash_prefix: [0; 4],
+                proof_version: PROOF_VERSION_CIRCUITS,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+
+    let vault_before = token_amount(&svm, &vault);
+    send_ok(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix_circuits(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            open_vk,
+            0,
+            amount,
+            &proof,
+        )],
+    );
+    assert_eq!(token_amount(&svm, &ata.pubkey()), amount);
+    assert_eq!(token_amount(&svm, &vault), vault_before - amount);
+
+    svm.expire_blockhash();
+    let replay = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix_circuits(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            open_vk,
+            0,
+            amount,
+            &proof,
+        )],
+    );
+    assert_eq!(replay, ClearingError::AlreadyInitialized as u32);
 }
