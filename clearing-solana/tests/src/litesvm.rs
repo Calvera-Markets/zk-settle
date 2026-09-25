@@ -1,13 +1,13 @@
-use clearing::account::Account;
-use clearing::commitment::hash_plain::Sha256Hasher;
-use clearing::commitment::{canonical_encode, StateTree};
-use clearing::commitment::{withdrawal_proof, withdrawals_root};
-use clearing::id::{AccountId, Amount, AssetId, L1Address};
 use ark_bn254::{Bn254, Fr};
 use ark_ff::PrimeField;
 use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
+use clearing::account::Account;
+use clearing::commitment::hash_plain::Sha256Hasher;
+use clearing::commitment::{canonical_encode, StateTree};
+use clearing::commitment::{withdrawal_proof, withdrawals_root};
+use clearing::id::{AccountId, Amount, AssetId, L1Address};
 use clearing_circuits::tree::MerkleTree;
 use clearing_circuits::{
     solana as circuits_solana, ClaimOpenCircuit, CommitRootsCircuit, DEPTH as CIRCUITS_DEPTH,
@@ -1786,8 +1786,7 @@ fn claim_v2_pays_vault_once() {
     airdrop(&mut svm, &user.pubkey());
     let ata = create_token_account(&mut svm, &payer, &mint.pubkey(), &user.pubkey());
 
-    let (open_vk_data, proof, w_root) =
-        prove_claim_open_for(user.pubkey().as_array(), 0, amount);
+    let (open_vk_data, proof, w_root) = prove_claim_open_for(user.pubkey().as_array(), 0, amount);
     let open_vk = Pubkey::new_from_array([0x0Au8; 32]);
     write_account(&mut svm, open_vk, PROGRAM_ID, open_vk_data);
 
@@ -2003,4 +2002,118 @@ fn settle_v2_posts_withdrawals_root() {
     )
     .unwrap();
     assert_eq!(rec.withdrawals_root, w_root);
+}
+
+#[test]
+fn circuits_e2e_settle_then_claim() {
+    let mut svm = setup_svm();
+    let payer = Keypair::new();
+    let admin = Keypair::new();
+    airdrop(&mut svm, &payer.pubkey());
+    airdrop(&mut svm, &admin.pubkey());
+    let amount = 1_000u64;
+    let (config, mint, vault) = funded_vault(&mut svm, &payer, &admin, amount);
+
+    let user = user_in_fr();
+    airdrop(&mut svm, &user.pubkey());
+    let ata = create_token_account(&mut svm, &payer, &mint.pubkey(), &user.pubkey());
+
+    let (open_vk_data, claim_proof, w_root) =
+        prove_claim_open_for(user.pubkey().as_array(), 0, amount);
+    let genesis = Config::unpack(&svm.get_account(&config).unwrap().data)
+        .unwrap()
+        .root;
+    let (settle_vk_data, settle_proof) = prove_commit_roots(&genesis, &genesis, &w_root);
+
+    let settle_vk = Pubkey::new_from_array([0x51u8; 32]);
+    let open_vk = Pubkey::new_from_array([0x0Au8; 32]);
+    write_account(&mut svm, settle_vk, PROGRAM_ID, settle_vk_data);
+    write_account(&mut svm, open_vk, PROGRAM_ID, open_vk_data);
+
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(settle_vk, false),
+            ],
+            data: RotateVkArgs {
+                guest_vk_hash: [0u8; 32],
+                groth16_vk_hash_prefix: [0; 4],
+                proof_version: PROOF_VERSION_CIRCUITS,
+            }
+            .pack()
+            .to_vec(),
+        }],
+    );
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[Instruction {
+            program_id: PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(admin.pubkey(), true),
+                AccountMeta::new(config, false),
+                AccountMeta::new_readonly(open_vk, false),
+            ],
+            data: pack_rotate_open_vk().to_vec(),
+        }],
+    );
+
+    let matcher = init_args(admin.pubkey()).matcher_key;
+    send(
+        &mut svm,
+        &admin,
+        &[&admin],
+        &[settle_ix_circuits(
+            admin.pubkey(),
+            settle_vk,
+            0,
+            genesis,
+            genesis,
+            w_root,
+            matcher,
+            &settle_proof,
+        )],
+    );
+
+    let vault_before = token_amount(&svm, &vault);
+    send_ok(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix_circuits(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            open_vk,
+            0,
+            amount,
+            &claim_proof,
+        )],
+    );
+    assert_eq!(token_amount(&svm, &ata.pubkey()), amount);
+    assert_eq!(token_amount(&svm, &vault), vault_before - amount);
+
+    svm.expire_blockhash();
+    let replay = send_custom_err(
+        &mut svm,
+        &user,
+        &[&user],
+        &[claim_ix_circuits(
+            user.pubkey(),
+            ata.pubkey(),
+            mint.pubkey(),
+            open_vk,
+            0,
+            amount,
+            &claim_proof,
+        )],
+    );
+    assert_eq!(replay, ClearingError::AlreadyInitialized as u32);
 }
