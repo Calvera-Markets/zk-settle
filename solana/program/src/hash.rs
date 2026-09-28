@@ -200,4 +200,18 @@ mod tests {
         assert!(verify_withdrawal(&root, 3, 0, &owner, 0, &amt, &[empty]));
         assert!(!verify_withdrawal(&root, 3, 0, &owner, 0, &amt, &[]));
     }
+
+    #[test]
+    fn verify_withdrawal_odd_index_and_hash_da() {
+        let owner = [7u8; 32];
+        let amt = 1_000i128.to_le_bytes();
+        let leaf0 = withdrawal_leaf(3, 0, &owner, 0, &amt);
+        let leaf1 = withdrawal_leaf(3, 1, &owner, 0, &amt);
+        let root = hash_node(&leaf0, &leaf1);
+        assert!(verify_withdrawal(&root, 3, 1, &owner, 0, &amt, &[leaf0]));
+        assert!(!verify_withdrawal(&root, 3, 1, &owner, 0, &amt, &[leaf1]));
+        let da = hash_da(b"blob");
+        assert_ne!(da, [0u8; 32]);
+        assert_ne!(da, hash_da(b"other"));
+    }
 }

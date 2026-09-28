@@ -661,6 +661,102 @@ mod tests {
     }
 
     #[test]
+    fn empty_withdrawals_root_is_defined() {
+        let root = withdrawals_root(&Sha256Hasher, 0, &[]);
+        assert_eq!(root, Sha256Hasher.hash_leaf(&[]));
+    }
+
+    #[test]
+    fn withdrawal_proof_roundtrip_index_one() {
+        let owner_a = owner(1);
+        let owner_b = owner(2);
+        let entries = [(owner_a, USDC, Amount(1)), (owner_b, USDC, Amount(2))];
+        let root = withdrawals_root(&Sha256Hasher, 3, &entries);
+        let sibs = withdrawal_proof(&Sha256Hasher, 3, &entries, 1);
+        assert!(verify_withdrawal(
+            &Sha256Hasher,
+            root,
+            3,
+            1,
+            owner_b,
+            USDC,
+            Amount(2),
+            &sibs
+        ));
+        assert!(!verify_withdrawal(
+            &Sha256Hasher,
+            root,
+            3,
+            1,
+            owner_a,
+            USDC,
+            Amount(2),
+            &sibs
+        ));
+    }
+
+    #[test]
+    fn parse_u8_decimal() {
+        assert_eq!(parse_u8("8"), 8);
+        assert_eq!(parse_u8("128"), 128);
+        assert_eq!(parse_u8("1"), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_empty() {
+        let _ = parse_u8("");
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_non_decimal() {
+        let _ = parse_u8("8a");
+    }
+
+    #[test]
+    fn withdrawals_root_pads_non_power_of_two() {
+        let entries = [
+            (owner(1), USDC, Amount(1)),
+            (owner(2), USDC, Amount(2)),
+            (owner(3), USDC, Amount(3)),
+        ];
+        let root = withdrawals_root(&Sha256Hasher, 9, &entries);
+        let sibs0 = withdrawal_proof(&Sha256Hasher, 9, &entries, 0);
+        let sibs2 = withdrawal_proof(&Sha256Hasher, 9, &entries, 2);
+        assert!(verify_withdrawal(
+            &Sha256Hasher,
+            root,
+            9,
+            0,
+            owner(1),
+            USDC,
+            Amount(1),
+            &sibs0
+        ));
+        assert!(verify_withdrawal(
+            &Sha256Hasher,
+            root,
+            9,
+            2,
+            owner(3),
+            USDC,
+            Amount(3),
+            &sibs2
+        ));
+        assert!(!verify_withdrawal(
+            &Sha256Hasher,
+            root,
+            9,
+            2,
+            owner(3),
+            USDC,
+            Amount(3),
+            &sibs0
+        ));
+    }
+
+    #[test]
     fn empty_tree_root_is_default() {
         let t = StateTree::new(Sha256Hasher);
         assert_eq!(t.root(), t.defaults[0]);
@@ -668,38 +764,15 @@ mod tests {
     }
 
     #[test]
-    fn ids_that_agree_on_low_depth_bits_share_a_slot() {
-        if DEPTH >= 128 {
-            return;
-        }
-        let a = acct(0x0B);
-        let b = acct(0x0B | (1u128 << DEPTH));
-        let mut sa = state_with_market();
-        sa.apply(&Tx::Deposit {
-            account: a,
-            asset: USDC,
-            amount: Amount(100),
-            nonce: 0,
-            owner: owner(1),
-            trading_key: None,
-        })
-        .unwrap();
-        let mut sb = state_with_market();
-        sb.apply(&Tx::Deposit {
-            account: b,
-            asset: USDC,
-            amount: Amount(100),
-            nonce: 0,
-            owner: owner(1),
-            trading_key: None,
-        })
-        .unwrap();
-        let ta = StateTree::from_state(Sha256Hasher, &sa);
-        let tb = StateTree::from_state(Sha256Hasher, &sb);
+    fn tree_index_uses_full_key_at_native_depth() {
         assert_eq!(
-            ta.root(),
-            tb.root(),
-            "account ids that match on the low {DEPTH} bits occupy one leaf slot"
+            tree_index(0x10B),
+            0x10B
+                & if DEPTH >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << DEPTH) - 1
+                }
         );
     }
 

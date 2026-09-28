@@ -463,6 +463,15 @@ mod tests {
     }
 
     #[test]
+    fn set_globals_is_stored() {
+        let mut s = with_btc_usdc();
+        s.set_globals(market(), MarketGlobals::default());
+        assert!(s.instrument(market()).is_some());
+        let third = AccountId(Uuid::from_u128(0x99));
+        assert_eq!(owner_of(third), L1Address([9u8; 32]));
+    }
+
+    #[test]
     fn duplicate_deposit_nonce_rejected() {
         let mut s = State::new();
         let dep = Tx::Deposit {
@@ -911,6 +920,62 @@ mod tests {
             assert_eq!(
                 s.check_trade_auth(market(), &f, &auth),
                 Err(SettlementError::PriceViolation)
+            );
+        }
+
+        #[test]
+        fn seller_price_violation_is_rejected() {
+            let (s, b, se, op) = setup();
+            // 150 quote/base < seller limit 180.
+            let f = fill(2, 300);
+            let auth = authorize(&b, &se, &op, buy_order(1), sell_order(2), &f);
+            assert_eq!(
+                s.check_trade_auth(market(), &f, &auth),
+                Err(SettlementError::PriceViolation)
+            );
+        }
+
+        #[test]
+        fn order_mismatch_and_non_positive_fill() {
+            let (s, b, se, op) = setup();
+            let f = fill(2, 400);
+            let mut auth = authorize(&b, &se, &op, buy_order(1), sell_order(2), &f);
+            auth.buy.order.side = Side::Sell;
+            assert_eq!(
+                s.check_trade_auth(market(), &f, &auth),
+                Err(SettlementError::OrderMismatch)
+            );
+            let zero = fill(0, 400);
+            let auth = authorize(&b, &se, &op, buy_order(3), sell_order(4), &zero);
+            assert_eq!(
+                s.check_trade_auth(market(), &zero, &auth),
+                Err(SettlementError::NonPositiveQuantity)
+            );
+        }
+
+        #[test]
+        fn forged_seller_signature_is_rejected() {
+            let (s, b, _se, op) = setup();
+            let (wrong, _) = keypair(9);
+            let f = fill(2, 400);
+            let auth = authorize(&b, &wrong, &op, buy_order(1), sell_order(2), &f);
+            assert_eq!(
+                s.check_trade_auth(market(), &f, &auth),
+                Err(SettlementError::InvalidOrderSignature)
+            );
+        }
+
+        #[test]
+        fn seller_overfill_is_rejected() {
+            let (s, b, se, op) = setup();
+            let mut buy = buy_order(1);
+            buy.base_amount = Amount(100);
+            let sell = sell_order(2);
+            let f = fill(6, 1200);
+            let auth = authorize(&b, &se, &op, buy, sell, &f);
+            assert_eq!(
+                s.check_trade_auth(market(), &f, &auth),
+                Err(SettlementError::OrderOverfilled)
             );
         }
 

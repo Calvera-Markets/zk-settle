@@ -105,6 +105,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verify_rejects_malformed_pubkey() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        let pk = Ed25519PubKey(bytes);
+        let sig = Ed25519Signature {
+            r: [0; 32],
+            s: [0; 32],
+        };
+        assert!(!verify(&pk, b"msg", &sig));
+    }
+
+    #[test]
     fn signature_bytes_round_trip() {
         let mut raw = [0u8; 64];
         for (i, b) in raw.iter_mut().enumerate() {

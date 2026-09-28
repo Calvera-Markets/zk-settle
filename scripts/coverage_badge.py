@@ -40,9 +40,41 @@ def badge_svg(percent: float) -> str:
 """
 
 
+def line_totals(summary_path: Path) -> tuple[int, int, float]:
+    report = json.loads(summary_path.read_text())
+    lines = report["data"][0]["totals"]["lines"]
+    return int(lines["count"]), int(lines["covered"]), float(lines["percent"])
+
+
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--combine":
+        if len(sys.argv) < 4:
+            print(
+                f"usage: {sys.argv[0]} --combine name:SUMMARY.json ... BADGE.svg",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        dest = Path(sys.argv[-1])
+        total_count = 0
+        total_covered = 0
+        for spec in sys.argv[2:-1]:
+            name, path = spec.split(":", 1)
+            count, covered, percent = line_totals(Path(path))
+            total_count += count
+            total_covered += covered
+            print(f"{name:10} {percent:6.2f}%  ({covered}/{count} lines)")
+        percent = (100.0 * total_covered / total_count) if total_count else 0.0
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(badge_svg(percent))
+        print(f"combined   {percent:6.2f}%  ({total_covered}/{total_count} lines)")
+        print(f"wrote {dest}")
+        return
     if len(sys.argv) != 3:
         print(f"usage: {sys.argv[0]} SUMMARY.json BADGE.svg", file=sys.stderr)
+        print(
+            f"       {sys.argv[0]} --combine name:SUMMARY.json ... BADGE.svg",
+            file=sys.stderr,
+        )
         sys.exit(2)
     summary = Path(sys.argv[1])
     dest = Path(sys.argv[2])

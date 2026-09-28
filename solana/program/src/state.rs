@@ -240,4 +240,113 @@ mod tests {
         assert_eq!(BatchRecord::DISC, account_disc("BatchRecord"));
         assert_eq!(Nullifier::DISC, account_disc("Nullifier"));
     }
+
+    fn assert_pack_unpack<T, F, G>(value: &T, len: usize, pack: F, unpack: G)
+    where
+        F: Fn(&T, &mut [u8]) -> Result<(), ProgramError>,
+        G: Fn(&[u8]) -> Result<T, ProgramError>,
+        T: PartialEq + std::fmt::Debug,
+    {
+        let mut buf = vec![0u8; len];
+        pack(value, &mut buf).unwrap();
+        assert_eq!(&unpack(&buf).unwrap(), value);
+        assert!(pack(value, &mut buf[..len.saturating_sub(1)]).is_err());
+        assert!(unpack(&buf[..len.saturating_sub(1)]).is_err());
+        let mut bad = buf;
+        bad[0] ^= 0xFF;
+        assert!(unpack(&bad).is_err());
+    }
+
+    #[test]
+    fn account_structs_pack_unpack_and_reject_bad_data() {
+        let cfg = Config {
+            disc: Config::DISC,
+            bump: 1,
+            vault_authority_bump: 2,
+            frozen: 0,
+            proof_version: 1,
+            groth16_vk_hash_prefix: [1, 2, 3, 4],
+            _pad: [],
+            root: [5u8; 32],
+            admin: [6u8; 32],
+            matcher_key: [7u8; 32],
+            freeze_authority: [8u8; 32],
+            vk_account: [9u8; 32],
+            open_vk_account: [10u8; 32],
+            guest_vk_hash: [11u8; 32],
+            batch_seq: 1,
+            expiry_height: 2,
+            next_deposit_nonce: 3,
+            next_asset_id: 4,
+            _pad2: [0; 4],
+        };
+        assert_pack_unpack(&cfg, Config::LEN, Config::pack, Config::unpack);
+
+        let meta = MintMeta {
+            disc: MintMeta::DISC,
+            bump: 1,
+            decimals: 6,
+            _pad: [0; 2],
+            asset_id: 1,
+            mint: [2u8; 32],
+            vault: [3u8; 32],
+        };
+        assert_pack_unpack(&meta, MintMeta::LEN, MintMeta::pack, MintMeta::unpack);
+
+        let owner = AccountOwner {
+            disc: AccountOwner::DISC,
+            bump: 1,
+            trading_key_set: 1,
+            _pad: [0; 6],
+            owner: [4u8; 32],
+        };
+        assert_pack_unpack(
+            &owner,
+            AccountOwner::LEN,
+            AccountOwner::pack,
+            AccountOwner::unpack,
+        );
+
+        let rec = DepositReceipt {
+            disc: DepositReceipt::DISC,
+            bump: 1,
+            _pad: [0; 7],
+            nonce: 9,
+            account_id: [5u8; 16],
+            asset_id: 1,
+            _pad2: [0; 4],
+            amount: 7,
+            owner: [6u8; 32],
+            trading_key: [7u8; 32],
+        };
+        assert_pack_unpack(
+            &rec,
+            DepositReceipt::LEN,
+            DepositReceipt::pack,
+            DepositReceipt::unpack,
+        );
+
+        let batch = BatchRecord {
+            disc: BatchRecord::DISC,
+            bump: 1,
+            _pad: [0; 7],
+            seq: 2,
+            new_root: [8u8; 32],
+            withdrawals_root: [9u8; 32],
+            da_hash: [10u8; 32],
+        };
+        assert_pack_unpack(
+            &batch,
+            BatchRecord::LEN,
+            BatchRecord::pack,
+            BatchRecord::unpack,
+        );
+
+        let n = Nullifier {
+            disc: Nullifier::DISC,
+            bump: 3,
+            _pad: [0; 7],
+        };
+        assert_pack_unpack(&n, Nullifier::LEN, Nullifier::pack, Nullifier::unpack);
+    }
 }

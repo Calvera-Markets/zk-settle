@@ -1059,4 +1059,95 @@ mod tests {
         );
         assert_eq!(c.total_escrow(USDC), 0);
     }
+
+    #[test]
+    fn frozen_rejects_deposit_and_commit() {
+        let mut e = engine();
+        let mut c = contract();
+        c.freeze();
+        assert_eq!(
+            c.deposit(buyer(), USDC, Amount(1), buyer_owner()),
+            Err(SettleError::Frozen)
+        );
+        let outcome = e
+            .step(vec![Tx::Deposit {
+                account: buyer(),
+                asset: USDC,
+                amount: Amount(1),
+                nonce: 0,
+                owner: buyer_owner(),
+                trading_key: None,
+            }])
+            .unwrap();
+        assert_eq!(c.commit(outcome.proposal()), Err(SettleError::Frozen));
+    }
+
+    #[test]
+    fn deposit_rejects_non_positive() {
+        let mut c = contract();
+        assert_eq!(
+            c.deposit(buyer(), USDC, Amount(0), buyer_owner()),
+            Err(SettleError::NonPositiveAmount)
+        );
+        assert_eq!(
+            c.deposit(buyer(), USDC, Amount(-1), buyer_owner()),
+            Err(SettleError::NonPositiveAmount)
+        );
+    }
+
+    #[test]
+    fn verify_nothing_pending_and_withdrawals_root_lookup() {
+        let mut c = contract();
+        assert_eq!(
+            c.verify_next(&Sha256Hasher),
+            Err(SettleError::NothingToVerify)
+        );
+        assert!(c.withdrawals_root(0).is_none());
+        let mut e = engine();
+        let dep = c.deposit(buyer(), USDC, Amount(10), buyer_owner()).unwrap();
+        let o = e.step(vec![dep]).unwrap();
+        c.commit(o.proposal()).unwrap();
+        c.verify_next(&Sha256Hasher).unwrap();
+        assert!(c.withdrawals_root(0).is_some());
+        assert!(c.withdrawals_root(1).is_none());
+    }
+
+    #[test]
+    fn escape_rejects_unfrozen_and_zero_balance() {
+        let mut e = engine();
+        let mut c = contract();
+        let dep = c.deposit(buyer(), USDC, Amount(10), buyer_owner()).unwrap();
+        let o = e.step(vec![dep]).unwrap();
+        c.commit(o.proposal()).unwrap();
+        c.verify_next(&Sha256Hasher).unwrap();
+        let accounts = crate::da::reconstruct(c.da_blobs());
+        let tree = StateTree::from_accounts(Sha256Hasher, accounts.iter());
+        let buyer_acct = accounts.get(&buyer()).cloned().unwrap();
+        let (mask, sibs) = tree.prove(buyer());
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &buyer_acct,
+                mask,
+                &sibs,
+                USDC,
+                buyer_owner(),
+            ),
+            Err(SettleError::NotFrozen)
+        );
+        c.freeze();
+        assert_eq!(
+            c.escape_withdraw(
+                &Sha256Hasher,
+                buyer(),
+                &buyer_acct,
+                mask,
+                &sibs,
+                BTC,
+                buyer_owner(),
+            ),
+            Err(SettleError::NothingToWithdraw)
+        );
+    }
 }

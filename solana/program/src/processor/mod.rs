@@ -6,3 +6,4 @@ pub mod freeze;
 pub mod initialize;
 pub mod register_mint;
 pub mod settle;
+pub mod verify;

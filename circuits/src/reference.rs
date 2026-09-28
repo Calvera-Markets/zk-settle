@@ -79,3 +79,27 @@ impl TradeScenario {
         (buyer, seller)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settle_matches_accepts() {
+        let ok = TradeScenario {
+            buyer_base: 0,
+            buyer_quote: 10,
+            seller_base: 5,
+            seller_quote: 0,
+            base_amount: 2,
+            quote_amount: 4,
+        };
+        assert!(ok.accepts());
+        assert_eq!(ok.settle(), ((2, 6), (3, 4)));
+        let bad = TradeScenario {
+            quote_amount: 99,
+            ..ok
+        };
+        assert!(!bad.accepts());
+    }
+}

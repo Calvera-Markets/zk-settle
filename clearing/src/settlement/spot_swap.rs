@@ -137,6 +137,28 @@ mod tests {
     }
 
     #[test]
+    fn spot_position_value_is_zero() {
+        let pos = Position {
+            instrument: InstrumentId(1),
+            signed_size: 1,
+            entry_price: Amount(1),
+            cached_funding_idx: None,
+        };
+        let inst = Instrument {
+            id: InstrumentId(1),
+            kind: SettlementKind::SpotSwap,
+            base: BTC,
+            quote: USDC,
+            base_scale: 8,
+            quote_scale: 6,
+        };
+        assert_eq!(
+            SpotSwap.position_value(&inst, &MarketGlobals::default(), &pos),
+            Amount::ZERO
+        );
+    }
+
+    #[test]
     fn exact_fill_swaps_balances() {
         let mut l = TestLedger::default();
         l.fund(buyer(), USDC, Amount(1000));
@@ -222,6 +244,23 @@ mod tests {
                 &mut l,
                 &fill(0, 100)
             ),
+            Err(SettlementError::NonPositiveQuantity)
+        );
+        assert_eq!(
+            SpotSwap.apply_fill(
+                &btc_usdc(),
+                &MarketGlobals::default(),
+                &mut l,
+                &fill(-1, 100)
+            ),
+            Err(SettlementError::NonPositiveQuantity)
+        );
+        assert_eq!(
+            SpotSwap.apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(1, 0)),
+            Err(SettlementError::NonPositiveQuantity)
+        );
+        assert_eq!(
+            SpotSwap.apply_fill(&btc_usdc(), &MarketGlobals::default(), &mut l, &fill(1, -1)),
             Err(SettlementError::NonPositiveQuantity)
         );
     }

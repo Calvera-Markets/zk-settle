@@ -15,7 +15,9 @@ use clearing::commitment::{
 use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
 use clearing::settlement::Fill;
-use clearing::{ExecutingProver, OnChainMessage, Prover, State, StateTree, Tx, Witness};
+#[cfg(not(test))]
+use clearing::{ExecutingProver, Prover};
+use clearing::{OnChainMessage, State, StateTree, Tx, Witness};
 
 #[cfg(not(feature = "poseidon2"))]
 use clearing::commitment::hash_plain::Sha256Hasher as H;
@@ -23,14 +25,18 @@ use clearing::commitment::hash_plain::Sha256Hasher as H;
 use clearing::commitment::hash_poseidon2::Poseidon2Hasher as H;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
+#[cfg(not(test))]
+use sp1_sdk::SP1ProofWithPublicValues;
+use sp1_sdk::{Elf, SP1Stdin, include_elf};
+#[cfg(not(all(test, debug_assertions)))]
 use sp1_sdk::{
-    Elf, HashableKey, ProvingKey as _, SP1ProofWithPublicValues, SP1Stdin,
+    HashableKey, ProvingKey as _,
     blocking::{EnvProver, ProveRequest as _, Prover as _, ProverClient},
-    include_elf,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[allow(dead_code)]
 const ELF: Elf = include_elf!("clearing-program");
 
 fn keypair(seed: u8) -> (SigningKey, Ed25519PubKey) {
@@ -195,8 +201,13 @@ fn build_witness(n_trades: u64) -> (Witness, Ed25519PubKey, u64, u64) {
     (witness, op_pk, expiry_height, batch_seq)
 }
 
+#[cfg(not(test))]
 fn arg_value(flag: &str) -> Option<String> {
-    let mut args = std::env::args();
+    arg_value_from(std::env::args(), flag)
+}
+
+fn arg_value_from(args: impl IntoIterator<Item = String>, flag: &str) -> Option<String> {
+    let mut args = args.into_iter();
     while let Some(a) = args.next() {
         if a == flag {
             return args.next();
@@ -251,6 +262,7 @@ fn find_groth16_vk(prefix: &[u8; 4]) -> Option<(PathBuf, Vec<u8>)> {
 ///
 /// Observed layout (356 bytes): `SHA256(gnark_vk)[0..4]` ‖ exit(32) ‖ vk_root(32)
 /// ‖ proof_nonce(32) ‖ A‖B‖C (256). Older docs assumed 260 (prefix + ABC only).
+#[cfg(not(test))]
 fn onchain_groth16_bytes(proof: &SP1ProofWithPublicValues) -> Vec<u8> {
     let mut bytes = proof.bytes();
     if let Some(tee) = &proof.tee_proof {
@@ -263,6 +275,7 @@ fn onchain_groth16_bytes(proof: &SP1ProofWithPublicValues) -> Vec<u8> {
     bytes
 }
 
+#[cfg(not(test))]
 fn dump_wrap_artifacts(
     dir: &Path,
     proof: &SP1ProofWithPublicValues,
@@ -327,6 +340,7 @@ fn dump_wrap_artifacts(
     println!("dumped wrap artifacts to {}", dir.display());
 }
 
+#[cfg(not(all(test, debug_assertions)))]
 fn execute_guest(client: &EnvProver, stdin: SP1Stdin) -> (Vec<u8>, u64) {
     let (public, report) = client.execute(ELF, stdin).run().expect("execute failed");
     (public.as_slice().to_vec(), report.total_instruction_count())
@@ -338,8 +352,13 @@ fn cap_threads() {
     }
 }
 
+fn allow_flag(env_name: &str) -> bool {
+    std::env::var(env_name).ok().as_deref() == Some("1")
+}
+
+#[cfg(not(test))]
 fn require_allow(flag: &str, env_name: &str) {
-    if std::env::var(env_name).ok().as_deref() != Some("1") {
+    if !allow_flag(env_name) {
         eprintln!(
             "refusing {flag}: this path pins tens of GB of RAM (SP1 setup / gnark wrap).\n\
              Re-run with {env_name}=1 RAYON_NUM_THREADS=2, and prefer an already-built\n\
@@ -349,6 +368,7 @@ fn require_allow(flag: &str, env_name: &str) {
     }
 }
 
+#[cfg(not(test))]
 fn main() {
     cap_threads();
     sp1_sdk::utils::setup_logger();
@@ -493,41 +513,49 @@ mod tests {
     #[test]
     fn execute_guest_matches_host_public_values() {
         // Debug SP1 execute takes minutes; this is the release test loop.
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             return;
         }
-        cap_threads();
-        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
-        let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
-        let client = ProverClient::from_env();
-        let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
-        let (pv, cycles) = execute_guest(&client, stdin);
-        eprintln!("execute_guest: {cycles} cycles at DEPTH={DEPTH}");
-        assert_eq!(pv.as_slice(), expected.as_slice());
+        #[cfg(not(debug_assertions))]
+        {
+            cap_threads();
+            let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+            let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+            let client = ProverClient::from_env();
+            let stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
+            let (pv, cycles) = execute_guest(&client, stdin);
+            eprintln!("execute_guest: {cycles} cycles at DEPTH={DEPTH}");
+            assert_eq!(pv.as_slice(), expected.as_slice());
+        }
     }
 
     #[test]
     fn prove_guest_core_verifies() {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             return;
         }
-        cap_threads();
-        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
-        let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
-        let client = ProverClient::from_env();
-        let pk = client.setup(ELF).expect("setup");
-        let proof = client
-            .prove(
-                &pk,
-                write_stdin(&witness, &matcher_key, batch_seq, expiry_height),
-            )
-            .run()
-            .expect("core prove");
-        client
-            .verify(&proof, pk.verifying_key(), None)
-            .expect("core verify");
-        assert_eq!(proof.public_values.as_slice(), expected.as_slice());
-        eprintln!("core prove+verify ok at DEPTH={DEPTH}");
+        #[cfg(not(debug_assertions))]
+        {
+            cap_threads();
+            let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+            let expected = expected_public_values(&witness, &matcher_key, batch_seq, expiry_height);
+            let client = ProverClient::from_env();
+            let pk = client.setup(ELF).expect("setup");
+            let proof = client
+                .prove(
+                    &pk,
+                    write_stdin(&witness, &matcher_key, batch_seq, expiry_height),
+                )
+                .run()
+                .expect("core prove");
+            client
+                .verify(&proof, pk.verifying_key(), None)
+                .expect("core verify");
+            assert_eq!(proof.public_values.as_slice(), expected.as_slice());
+            eprintln!("core prove+verify ok at DEPTH={DEPTH}");
+        }
     }
 
     #[test]
@@ -631,5 +659,72 @@ mod tests {
             0x05, 0xee, 0x91, 0xbd,
         ];
         assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn arg_value_from_reads_flag_and_equals_form() {
+        let args = ["host", "--dump-dir", "/tmp/out"].map(String::from);
+        assert_eq!(
+            arg_value_from(args, "--dump-dir").as_deref(),
+            Some("/tmp/out")
+        );
+        let args = ["host", "--dump-dir=/tmp/out"].map(String::from);
+        assert_eq!(
+            arg_value_from(args, "--dump-dir").as_deref(),
+            Some("/tmp/out")
+        );
+        let args = ["host", "--prove"].map(String::from);
+        assert!(arg_value_from(args, "--dump-dir").is_none());
+        let args = ["host", "--dump-dir"].map(String::from);
+        assert!(arg_value_from(args, "--dump-dir").is_none());
+    }
+
+    #[test]
+    fn sha256_bytes_and_allow_flag() {
+        let h = sha256_bytes(b"abc");
+        assert_ne!(h, [0u8; 32]);
+        assert_eq!(h, <[u8; 32]>::from(Sha256::digest(b"abc")));
+        assert!(!allow_flag("SP1_ALLOW_GROTH16_COVERAGE_TEST_UNSET"));
+        std::env::set_var("SP1_ALLOW_GROTH16_COVERAGE_TEST", "1");
+        assert!(allow_flag("SP1_ALLOW_GROTH16_COVERAGE_TEST"));
+        std::env::remove_var("SP1_ALLOW_GROTH16_COVERAGE_TEST");
+    }
+
+    #[test]
+    fn find_groth16_vk_matches_prefix() {
+        let dir = std::env::temp_dir().join(format!("zk-cov-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("groth16_vk.bin");
+        let bytes = b"vk-bytes-for-coverage".to_vec();
+        std::fs::write(&path, &bytes).unwrap();
+        let hash = sha256_bytes(&bytes);
+        let prefix: [u8; 4] = hash[..4].try_into().unwrap();
+        std::env::set_var("SP1_GROTH16_VK", &path);
+        let found = find_groth16_vk(&prefix).expect("match explicit vk path");
+        assert_eq!(found.1, bytes);
+        assert!(find_groth16_vk(&[0xff; 4]).is_none());
+        std::env::remove_var("SP1_GROTH16_VK");
+
+        let old_home = std::env::var_os("HOME");
+        let home = dir.join("home");
+        let nested = home.join(".sp1/circuits/v1");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("groth16_vk.bin"), &bytes).unwrap();
+        std::env::set_var("HOME", &home);
+        let found = find_groth16_vk(&prefix).expect("match HOME search");
+        assert_eq!(found.1, bytes);
+        match old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_stdin_and_cap_threads_do_not_panic() {
+        cap_threads();
+        let (witness, matcher_key, expiry_height, batch_seq) = build_witness(1);
+        let _stdin = write_stdin(&witness, &matcher_key, batch_seq, expiry_height);
+        assert!(!witness.updates.is_empty());
     }
 }

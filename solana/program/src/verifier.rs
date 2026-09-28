@@ -24,8 +24,6 @@
 //! Proof is 256 bytes `A ‖ B ‖ C` (circuits `proof_to_bytes` does not negate A).
 //! This module always negates A as G1 `(x, y) → (x, p − y)` over BN254 Fq.
 
-use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
-
 use crate::error::ClearingError;
 
 pub const PROOF_LEN: usize = 256;
@@ -332,32 +330,6 @@ pub fn verify_plain(
     pairing_verify(&a_neg, &b, &c, public_inputs, &vk)
 }
 
-pub fn process(_program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    let [vk_account, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if data.len() < PROOF_LEN || !(data.len() - PROOF_LEN).is_multiple_of(FR_LEN) {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    let n = (data.len() - PROOF_LEN) / FR_LEN;
-    if n > MAX_PUBLIC_INPUTS {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let proof: [u8; PROOF_LEN] = data[..PROOF_LEN]
-        .try_into()
-        .map_err(|_| ProgramError::InvalidInstructionData)?;
-    let mut inputs = [[0u8; FR_LEN]; MAX_PUBLIC_INPUTS];
-    for (i, slot) in inputs.iter_mut().take(n).enumerate() {
-        let off = PROOF_LEN + i * FR_LEN;
-        slot.copy_from_slice(&data[off..off + FR_LEN]);
-    }
-
-    let vk_data = vk_account.try_borrow()?;
-    verify_plain(&vk_data, &proof, &inputs[..n])?;
-    Ok(())
-}
-
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
 fn pairing_verify(
     proof_a: &[u8; G1_LEN],
@@ -645,5 +617,94 @@ mod tests {
             verify_sp1_wrap(&vk, &[0u8; 32], &[0u8; 4], &proof, &pv).unwrap_err(),
             ClearingError::InvalidProof
         );
+    }
+
+    #[test]
+    fn parse_vk_rejects_trailing_and_empty_ic() {
+        assert_eq!(
+            parse_vk(&dummy_vk_bytes(0, 0)).unwrap_err(),
+            ClearingError::InvalidAccount
+        );
+        let mut odd = dummy_vk_bytes(1, 0);
+        odd.push(0);
+        assert_eq!(parse_vk(&odd).unwrap_err(), ClearingError::InvalidAccount);
+    }
+
+    #[test]
+    fn encode_vk_account_rejects_short_and_empty_ic() {
+        assert!(encode_vk_account(&[0u8; 10]).is_err());
+        assert!(encode_vk_account(&[0u8; 448]).is_err());
+    }
+
+    #[test]
+    fn u32_and_u64_be32_place_value_in_low_bytes() {
+        let u = u32_be32(0x0102_0304);
+        assert_eq!(&u[28..], &[1, 2, 3, 4]);
+        assert_eq!(&u[..28], &[0u8; 28]);
+        let v = u64_be32(0x0102_0304_0506_0708);
+        assert_eq!(&v[24..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn wrap_public_inputs_copies_header_fields() {
+        let mut proof = [0u8; WRAP_PROOF_LEN];
+        proof[WRAP_PREFIX_LEN] = 0x11;
+        proof[WRAP_PREFIX_LEN + 32] = 0x22;
+        proof[WRAP_PREFIX_LEN + 64] = 0x33;
+        let ins = wrap_public_inputs(&[0x44; 32], &[0x55; 144], &proof);
+        assert_eq!(ins[0][0], 0x44);
+        assert_eq!(ins[2][0], 0x11);
+        assert_eq!(ins[3][0], 0x22);
+        assert_eq!(ins[4][0], 0x33);
+    }
+
+    #[test]
+    fn verify_sp1_wrap_rejects_fr_overflow_input() {
+        let vk = dummy_vk_bytes(6, 5);
+        let proof = [0u8; WRAP_PROOF_LEN];
+        let pv = [0u8; 144];
+        assert_eq!(
+            verify_sp1_wrap(&vk, &[0xFFu8; 32], &[0u8; 4], &proof, &pv).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+    }
+
+    #[test]
+    fn verify_plain_rejects_nr_mismatch_and_fr_overflow() {
+        let vk = dummy_vk_bytes(2, 1);
+        let proof = [0u8; PROOF_LEN];
+        let two = [[0u8; FR_LEN], [0u8; FR_LEN]];
+        assert_eq!(
+            verify_plain(&vk, &proof, &two).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+        let mut too_big = [0u8; FR_LEN];
+        too_big[0] = 0xFF;
+        assert_eq!(
+            verify_plain(&vk, &proof, &[too_big]).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+        let vk9 = dummy_vk_bytes(10, 9);
+        let nine = [[0u8; FR_LEN]; 9];
+        assert_eq!(
+            verify_plain(&vk9, &proof, &nine).unwrap_err(),
+            ClearingError::InvalidProof
+        );
+    }
+
+    #[test]
+    fn verify_plain_pairing_arms_reject_junk() {
+        let proof = [0u8; PROOF_LEN];
+        for n in 0..=8 {
+            let vk = dummy_vk_bytes(n + 1, n as u32);
+            let inputs = vec![[0u8; FR_LEN]; n];
+            let _ = verify_plain(&vk, &proof, &inputs);
+        }
+    }
+
+    #[test]
+    fn verifier_process_rejects_empty_accounts() {
+        let id = crate::ID;
+        assert!(crate::processor::verify::process(&id, &[], &[0u8; PROOF_LEN]).is_err());
     }
 }

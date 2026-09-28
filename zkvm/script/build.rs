@@ -10,5 +10,17 @@ fn main() {
     if cfg!(feature = "poseidon2") {
         args.features.push("poseidon2".to_string());
     }
+    // Guest is RISC-V; llvm-cov's -C instrument-coverage has no profiler runtime there.
+    for key in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "LLVM_PROFILE_FILE",
+        "CARGO_INCREMENTAL",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_LLVM_COV",
+    ] {
+        std::env::remove_var(key);
+    }
     build_program_with_args("../program", args);
 }

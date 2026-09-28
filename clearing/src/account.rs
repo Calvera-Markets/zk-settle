@@ -185,7 +185,7 @@ impl Account {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::AccountId;
+    use crate::id::{AccountId, InstrumentId};
     use uuid::Uuid;
 
     fn acct() -> AccountId {
@@ -193,6 +193,49 @@ mod tests {
     }
 
     const USDC: AssetId = AssetId(0);
+
+    #[test]
+    fn owner_and_trading_key_setters() {
+        let mut a = Account::new();
+        let o = L1Address([7u8; 32]);
+        a.set_l1_owner(o).unwrap();
+        a.set_l1_owner(o).unwrap();
+        assert_eq!(a.l1_owner(), Some(o));
+        assert_eq!(
+            a.set_l1_owner(L1Address([8u8; 32])).unwrap_err(),
+            SettlementError::OwnerMismatch
+        );
+        let k = crate::auth::Ed25519PubKey([1u8; 32]);
+        a.set_trading_key(k).unwrap();
+        assert_eq!(a.trading_key(), Some(k));
+        assert_eq!(
+            a.set_trading_key(crate::auth::Ed25519PubKey([2u8; 32]))
+                .unwrap_err(),
+            SettlementError::KeyAlreadyRegistered
+        );
+    }
+
+    #[test]
+    fn canonical_encode_includes_position_funding_idx() {
+        let mut a = Account::new();
+        a.positions.insert(
+            InstrumentId(7),
+            Position {
+                instrument: InstrumentId(7),
+                signed_size: 3,
+                entry_price: Amount(9),
+                cached_funding_idx: Some(11),
+            },
+        );
+        let with_idx = crate::commitment::canonical_encode(&a);
+        a.positions
+            .get_mut(&InstrumentId(7))
+            .unwrap()
+            .cached_funding_idx = None;
+        let without_idx = crate::commitment::canonical_encode(&a);
+        assert_ne!(with_idx, without_idx);
+        assert!(with_idx.len() > without_idx.len());
+    }
 
     #[test]
     fn credit_then_debit() {

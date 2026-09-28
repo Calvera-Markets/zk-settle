@@ -329,6 +329,119 @@ mod tests {
         let unpacked = SettleArgs::unpack(&packed[1..]).unwrap();
         assert_eq!(unpacked, args);
     }
+
+    #[test]
+    fn remaining_ix_pack_unpack() {
+        assert!(InitializeArgs::unpack(&[]).is_err());
+        let init = InitializeArgs {
+            genesis_root: [1u8; 32],
+            admin: [2u8; 32],
+            matcher_key: [3u8; 32],
+            freeze_authority: [4u8; 32],
+            guest_vk_hash: [5u8; 32],
+            groth16_vk_hash_prefix: [6, 7, 8, 9],
+            proof_version: 1,
+        };
+        let p = init.pack();
+        assert_eq!(p[0], INITIALIZE);
+        assert_eq!(InitializeArgs::unpack(&p[1..]).unwrap(), init);
+
+        let dep_none = DepositArgs {
+            account_id: [1u8; 16],
+            amount: 9,
+            trading_key: None,
+        };
+        let p = dep_none.pack();
+        assert_eq!(p.as_slice()[0], DEPOSIT);
+        assert_eq!(DepositArgs::unpack(&p.as_slice()[1..]).unwrap(), dep_none);
+        assert!(DepositArgs::unpack(&[]).is_err());
+        let mut bad_none = p.as_slice()[1..].to_vec();
+        bad_none.push(0);
+        assert!(DepositArgs::unpack(&bad_none).is_err());
+
+        let dep_key = DepositArgs {
+            account_id: [2u8; 16],
+            amount: 11,
+            trading_key: Some([3u8; 32]),
+        };
+        let p = dep_key.pack();
+        assert_eq!(DepositArgs::unpack(&p.as_slice()[1..]).unwrap(), dep_key);
+        let mut short_key = p.as_slice()[1..].to_vec();
+        short_key.pop();
+        assert!(DepositArgs::unpack(&short_key).is_err());
+        let mut bad_tag = vec![0u8; DepositArgs::LEN_NONE];
+        bad_tag[24] = 0x02;
+        assert!(DepositArgs::unpack(&bad_tag).is_err());
+
+        let rm = RegisterMintArgs { decimals: 6 };
+        let p = rm.pack();
+        assert_eq!(p[0], REGISTER_MINT);
+        assert_eq!(RegisterMintArgs::unpack(&p[1..]).unwrap(), rm);
+        assert!(RegisterMintArgs::unpack(&[]).is_err());
+
+        let cl = ClaimArgs {
+            batch_seq: 1,
+            index: 2,
+            asset_id: 3,
+            amount: 4,
+            n_siblings: 0,
+        };
+        let mut data = cl.pack_header().to_vec();
+        data.extend_from_slice(&[0u8; 256]);
+        let (u, rest) = ClaimArgs::unpack(&data[1..]).unwrap();
+        assert_eq!(u, cl);
+        assert_eq!(rest.len(), 256);
+        assert!(ClaimArgs::unpack(&[]).is_err());
+        let cl1 = ClaimArgs {
+            n_siblings: 1,
+            ..cl
+        };
+        let mut sib = cl1.pack_header().to_vec();
+        sib.extend_from_slice(&[7u8; 32]);
+        let (u, rest) = ClaimArgs::unpack(&sib[1..]).unwrap();
+        assert_eq!(u.n_siblings, 1);
+        assert_eq!(rest, &[7u8; 32]);
+        let mut bad_sib = cl1.pack_header().to_vec();
+        bad_sib.extend_from_slice(&[7u8; 16]);
+        assert!(ClaimArgs::unpack(&bad_sib[1..]).is_err());
+
+        let esc = EscapeWithdrawArgs {
+            account_id: [9u8; 16],
+            asset_id: 7,
+        };
+        let p = esc.pack();
+        assert_eq!(EscapeWithdrawArgs::unpack(&p[1..]).unwrap(), esc);
+        assert!(EscapeWithdrawArgs::unpack(&[0u8; 3]).is_err());
+
+        let sa = SetAdminArgs {
+            new_admin: [8u8; 32],
+        };
+        let p = sa.pack();
+        assert_eq!(p[0], SET_ADMIN);
+        assert_eq!(SetAdminArgs::unpack(&p[1..]).unwrap(), sa);
+        assert!(SetAdminArgs::unpack(&[0u8; 2]).is_err());
+
+        let rv = RotateVkArgs {
+            guest_vk_hash: [1u8; 32],
+            groth16_vk_hash_prefix: [1, 2, 3, 4],
+            proof_version: 2,
+        };
+        let p = rv.pack();
+        assert_eq!(RotateVkArgs::unpack(&p[1..]).unwrap(), rv);
+        assert!(RotateVkArgs::unpack(&[0u8; 2]).is_err());
+        assert_eq!(pack_freeze()[0], FREEZE);
+        assert_eq!(pack_rotate_open_vk()[0], ROTATE_OPEN_VK);
+        assert!(SettleArgs::unpack(&[0u8; 3]).is_err());
+
+        let settle = SettleArgs {
+            proof: [0xABu8; SETTLE_PROOF_LEN],
+            public_values: pack_public_values(&[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 9, 8),
+            da_hash: [0xCDu8; 32],
+        };
+        let pv = settle.public_values();
+        assert_eq!(pv.batch_seq, 9);
+        assert_eq!(pv.expiry_height, 8);
+    }
 }
 
 pub fn pack_freeze() -> [u8; 1] {

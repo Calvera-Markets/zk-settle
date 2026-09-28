@@ -44,3 +44,20 @@ impl TxSource for SyntheticSource {
         self.batches.pop_front()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_source_queues_and_drains() {
+        let mut src = SyntheticSource::new(vec![vec![]]);
+        assert_eq!(src.remaining(), 1);
+        src.push(vec![]);
+        assert_eq!(src.remaining(), 2);
+        assert!(src.next_batch().is_some());
+        assert!(src.next_batch().is_some());
+        assert!(src.next_batch().is_none());
+        assert_eq!(src.remaining(), 0);
+    }
+}
