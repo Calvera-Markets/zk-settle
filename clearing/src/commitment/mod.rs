@@ -1,5 +1,5 @@
 //! The state commitment: a sparse Merkle tree over accounts, keyed by
-//! [`AccountId`], producing a [`Hash`] root.
+//! [`AccountId`], producing a [`tyalias@Hash`] root.
 //!
 //! The root is the cryptographic commitment to the entire account state — what
 //! a validity proof will attest to and what on-chain settlement would store.
@@ -154,7 +154,7 @@ pub fn canonical_encode(account: &Account) -> Vec<u8> {
     out
 }
 
-/// Canonical, versioned byte encoding of an [`Order`] — the message a user's
+/// Canonical, versioned byte encoding of an [`crate::auth::Order`]: the message a user's
 /// trading key signs and the preimage of the order's identity. Fixed-width
 /// little-endian, version-guarded, same discipline as `canonical_encode`.
 pub fn encode_order(order: &crate::auth::Order) -> Vec<u8> {

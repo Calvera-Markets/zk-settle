@@ -157,9 +157,11 @@ fn deposit_trade_withdraw_settles_and_stays_solvent() {
     assert_eq!(contract.pending_withdrawals(USDC), Amount::ZERO);
     assert!(contract.is_solvent(engine.state(), &assets));
     // A second claim (replay) is rejected by the nullifier.
-    assert!(contract
-        .claim(&Sha256Hasher, 2, 0, owner, USDC, Amount(100), &siblings)
-        .is_err());
+    assert!(
+        contract
+            .claim(&Sha256Hasher, 2, 0, owner, USDC, Amount(100), &siblings)
+            .is_err()
+    );
 
     // ---- whole-loop assertions --------------------------------------------
     // Every batch advanced the root, and the chain is unbroken from genesis to

@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use clearing::commitment::hash_plain::Sha256Hasher;
-use clearing::commitment::{withdrawal_proof, StateTree};
+use clearing::commitment::{StateTree, withdrawal_proof};
 use clearing::da;
 use clearing::id::{AccountId, Amount, AssetId, InstrumentId, L1Address, MarketId};
 use clearing::instrument::{Instrument, SettlementKind};
@@ -46,11 +46,7 @@ fn who(buyer_side: bool) -> (AccountId, L1Address) {
     }
 }
 fn asset(usdc: bool) -> AssetId {
-    if usdc {
-        USDC
-    } else {
-        BTC
-    }
+    if usdc { USDC } else { BTC }
 }
 
 #[derive(Clone, Debug)]
@@ -125,9 +121,10 @@ impl Harness {
     }
 
     fn assert_settled(&self) {
-        assert!(self
-            .contract
-            .is_solvent(self.engine.state(), &Self::assets()));
+        assert!(
+            self.contract
+                .is_solvent(self.engine.state(), &Self::assets())
+        );
         assert_eq!(self.contract.root(), self.engine.root());
     }
 

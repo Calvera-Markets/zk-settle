@@ -9,19 +9,19 @@
 //!
 //! ## What S1 covers
 //!
-//! - **Custody.** [`Self::deposit`] / [`Self::release`] move amounts in an
+//! - **Custody.** [`MockSettlementContract::deposit`] and escrow releases move amounts in an
 //!   in-memory `escrow` ledger — deposited funds and withdrawal payouts are just
 //!   entries here, obeying the same rules the real contract will.
-//! - **Commit → verify.** [`Self::commit`] queues a [`BatchProposal`] that
-//!   extends the committed chain; [`Self::verify_next`] runs the [`Prover`]
+//! - **Commit → verify.** [`MockSettlementContract::commit`] queues a [`BatchProposal`] that
+//!   extends the committed chain; [`MockSettlementContract::verify_next`] runs the [`Prover`]
 //!   verifier against the canonical root and **only advances the root on a valid
 //!   proof**. A bad proof changes nothing.
 //! - **Async withdrawals.** Settling a batch does **not** pay out inline — a real
 //!   (Solana) settle tx can't push N per-recipient payouts. Instead `verify_next`
 //!   commits the batch's withdrawals as one Merkle root; each user later
-//!   [`Self::claim`]s with an inclusion proof, paid once (nullifier-gated). See
+//!   [`MockSettlementContract::claim`]s with an inclusion proof, paid once (nullifier-gated). See
 //!   `../docs/parralel.md` for the tx-limit reasoning.
-//! - **Solvency.** [`Self::is_solvent`] checks the north-star invariant: per
+//! - **Solvency.** [`MockSettlementContract::is_solvent`] checks the north-star invariant: per
 //!   asset, escrow == Σ L2 balances **+ authorized-but-unclaimed withdrawals**
 //!   (the pending term, since payouts lag settlement).
 //!
@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use crate::account::Account;
 use crate::commitment::{
-    canonical_encode, default_hashes, root_from_path, verify_withdrawal, withdrawals_root, Hash,
-    Hasher,
+    Hash, Hasher, canonical_encode, default_hashes, root_from_path, verify_withdrawal,
+    withdrawals_root,
 };
 use crate::da::DaBlob;
 use crate::id::{AccountId, Amount, AssetId, L1Address};
@@ -51,7 +51,7 @@ use crate::tx::{OnChainMessage, Tx};
 /// The withdrawal messages the contract acts on live **inside the witness**
 /// ([`Witness::messages`]) — so they are part of what the proof binds, not a
 /// separately-supplied (and forgeable) field. A verifier that checks execution
-/// ([`ExecutingProver`]) rejects a batch whose `witness.messages` don't match a
+/// ([`crate::prover::ExecutingProver`]) rejects a batch whose `witness.messages` don't match a
 /// real debit, so the contract can release on them safely.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BatchProposal {
@@ -562,8 +562,8 @@ impl<V: Prover> MockSettlementContract<V> {
 mod tests {
     use super::*;
     use crate::account::Account;
-    use crate::commitment::hash_plain::Sha256Hasher;
     use crate::commitment::StateTree;
+    use crate::commitment::hash_plain::Sha256Hasher;
     use crate::id::{AccountId, InstrumentId, L1Address, MarketId};
     use crate::instrument::{Instrument, SettlementKind};
     use crate::settlement::Fill;

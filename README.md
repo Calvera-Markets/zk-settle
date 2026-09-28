@@ -1,14 +1,17 @@
 # zk-settlement
 
-Clearing for a validity exchange: the post-trade slice. Matching and the order book live elsewhere.
+[![CI](https://github.com/Calvera-Markets/zk-settlement/actions/workflows/ci.yml/badge.svg)](https://github.com/Calvera-Markets/zk-settlement/actions/workflows/ci.yml)
+![coverage](badges/coverage.svg)
 
-An off-chain engine keeps balances, applies spot settlement, and commits a Merkle root. A Solana program holds Token-2022 vaults against that root. Users deposit on-chain; the matcher posts a Groth16 proof of a batch; users claim withdrawals from a per-batch tree. If the matcher stalls, freeze plus an inclusion proof against the last committed root lets a user escape.
+Off-chain clearing for a validity exchange, plus a Solana program that holds the funds. Matching and the order book are not in this repo.
 
-This repo is the clearing slice only. There is no matcher or order book here. v0 settlement is spot.
+The engine keeps balances, runs spot settlement, and commits a Merkle root. The program holds Token-2022 vaults against that root. Users deposit on-chain. The matcher posts a Groth16 proof of a batch. Users claim withdrawals from a per-batch tree. If the matcher stalls, a freeze plus an inclusion proof against the last committed root lets a user escape.
+
+v0 settlement is spot only.
 
 ## Layout
 
-Four Cargo workspaces. The root workspace only builds the native spec:
+Four Cargo workspaces. The root workspace builds only the native spec:
 
 ```
 members = ["clearing"]
@@ -22,15 +25,15 @@ exclude = ["clearing-zkvm", "clearing-circuits", "clearing-solana"]
 | `clearing-circuits/` | Laptop Groth16/BN254 (Poseidon tree, BabyJubJub auth) |
 | `clearing-solana/` | Pinocchio program: custody, settle, claim, freeze/escape |
 
-`cargo build --workspace` at the repo root only builds `clearing`.
+`cargo build --workspace` at the repo root therefore only builds `clearing`.
 
 ## Native spec (`clearing`)
 
-Integer amounts, checked arithmetic. Accounts are `balances + positions` behind a `Settlement` trait. Spot is implemented; a new instrument is a new `SettlementKind` arm plus a `Settlement` impl.
+Integer amounts and checked arithmetic. Accounts are `balances + positions` behind a `Settlement` trait. Spot is implemented. A new instrument is a new `SettlementKind` arm plus a `Settlement` impl.
 
-The SHA-256 tree is keyed by account UUID. Depth is compile-time `CLEARING_TREE_DEPTH` (default **128**). The zkVM workspace pins **8** so execute / CORE prove stay small.
+The SHA-256 tree is keyed by account UUID. Depth is compile-time `CLEARING_TREE_DEPTH` (default 128). The zkVM workspace pins 8 so execute and CORE prove stay small.
 
-Trades are ed25519-authenticated (maker, taker, matcher). `ExecutingProver` re-applies the batch and binds execution plus withdrawal messages to the leaves.
+Trades are authorized with ed25519 (maker, taker, and matcher over the fill). `ExecutingProver` re-applies the batch and binds execution plus withdrawal messages to the committed leaves.
 
 Guest public values (144 bytes):
 
@@ -46,7 +49,7 @@ cargo run -p clearing --example spot_demo
 
 ## SP1 guest (`clearing-zkvm`)
 
-Same prover as native Rust, compiled for SP1. Invalid witnesses panic. SHA-256 and ed25519 use SP1 precompiles.
+The guest is that same prover, compiled for SP1. Invalid witnesses panic; no proof can be produced. SHA-256 and ed25519 use SP1 precompiles.
 
 From `clearing-zkvm/` (tree depth 8):
 
@@ -55,11 +58,11 @@ cargo run -p clearing-script --release --locked                 # execute, no pr
 SP1_ALLOW_PROVE=1 ./target/release/clearing-host --prove       # CORE
 ```
 
-`--groth16` wraps the whole SP1 recursion circuit (~20 min, tens of GB). It is not a unit test. Dump with `SP1_ALLOW_GROTH16=1` and `--dump-dir`. A recorded wrap lives in `clearing-solana/fixtures/sp1/` (`kat_sp1`).
+`--groth16` wraps the whole SP1 recursion circuit (about 20 minutes and tens of GB). That is not a unit test. Dump with `SP1_ALLOW_GROTH16=1` and `--dump-dir`. A recorded wrap is in `clearing-solana/fixtures/sp1/` (`kat_sp1`).
 
 ## Circuits (`clearing-circuits`)
 
-Hand-written Groth16 over BN254. Poseidon-over-BN254 tree and BabyJubJub EdDSA — same settlement *rules* as `clearing`, different leaf encoding. Laptop-safe (tens of seconds).
+Hand-written Groth16 over BN254, the curve Solana verifies with `alt_bn128`. The tree is Poseidon-over-BN254 and auth is BabyJubJub EdDSA. Settlement rules match `clearing`; leaf encoding does not. The suite is tens of seconds on a laptop.
 
 ```sh
 cd clearing-circuits
@@ -71,7 +74,7 @@ cargo run --release --example e2e
 
 Pinocchio 0.10. Program id: `AyALYha1o9u43sYybKhfgja7ZtSVXkqUzzVijgkYCm1`.
 
-Token-2022 only, 82-byte mint layout, no extensions, no mint freeze authority. `admin` and `matcher_key` are different keys.
+Custody is Token-2022 only. Mints and token accounts must be the 82-byte base layout: no extensions, and a freeze authority on the mint is rejected so an issuer cannot freeze the vault. `admin` and `matcher_key` are different keys.
 
 `proof_version` is set at initialize / `rotate_vk` and stays for that deployment:
 
@@ -80,7 +83,7 @@ Token-2022 only, 82-byte mint layout, no extensions, no mint freeze authority. `
 | 1 | SP1 Groth16 wrap (356-byte proof) | SHA-256 Merkle path vs `withdrawals_root` / `root` |
 | 2 | Circuits Groth16 (first 256 bytes) | Groth16 `ClaimOpenCircuit` (Poseidon leaf inside the proof) |
 
-Version 2 uses a separate `open_vk_account` for claim/escape (`rotate_open_vk`). Solana never hashes Poseidon.
+Version 2 uses a separate `open_vk_account` for claim and escape (`rotate_open_vk`). The program does not hash Poseidon.
 
 ### Instructions
 
@@ -98,16 +101,16 @@ Version 2 uses a separate `open_vk_account` for claim/escape (`rotate_open_vk`).
 | 9 | `verify_plain` |
 | 10 | `rotate_open_vk` |
 
-Test SBF is built with `--features mock-proof` (`proof_version = 0` skips pairing). Production must not enable that. Wrap settle is covered by `kat_sp1`. Circuits claim/settle through the vault is `circuits_e2e_settle_then_claim`.
+The test SBF build uses `--features mock-proof` (`proof_version = 0` skips pairing). Production deploys must not enable that. Wrap settle is `kat_sp1`. Circuits settle then claim through the vault is `circuits_e2e_settle_then_claim`.
 
 ```sh
 cargo test --manifest-path clearing-solana/Cargo.toml
 ```
 
-Do not `cargo test -p clearing-solana-program` from the repo root.
+Do not `cargo test -p clearing-solana-program` from the repo root; that package is not in the host workspace.
 
 ## Status
 
-Shipped: spot clearing, SHA-256 tree, SP1 guest + wrap fixture, circuits Groth16, Solana custody with both proof modes, freeze/escape, solvency tests.
+What is here: spot clearing, the SHA-256 tree, the SP1 guest and wrap fixture, circuits Groth16, Solana custody with both proof modes, freeze/escape, solvency tests.
 
-Not in this repo: perps/futures, matcher, order book.
+What is not: perps, futures, matcher, order book.
