@@ -1,4 +1,4 @@
-//! The replay-loop driver — the v0 end-to-end deliverable.
+//! The replay-loop driver
 //!
 //! [`Engine`] owns the clearing [`State`], its [`StateTree`] commitment, and a
 //! [`Prover`]. It pulls batches from a [`TxSource`], applies each one
@@ -45,7 +45,7 @@ impl BatchOutcome {
         self.witness.new_root
     }
     /// Package this outcome as a [`BatchProposal`] for the settlement contract
-    /// (the witness to verify — which carries the proven withdrawal messages —
+    /// (the witness to verify, which carries the proven withdrawal messages
     /// plus the DA blob to publish).
     pub fn proposal(&self) -> BatchProposal {
         BatchProposal::new(self.witness.clone(), self.da.clone())
@@ -68,7 +68,7 @@ impl<H: Hasher, P: Prover> Engine<H, P> {
         }
     }
 
-    /// Register the instrument a market trades (v0 admin path; do this before
+    /// Register the instrument a market trades (do this before
     /// clearing trades on that market).
     pub fn register_market(&mut self, market: MarketId, instrument: Instrument) {
         self.state.register_market(market, instrument);
@@ -77,7 +77,7 @@ impl<H: Hasher, P: Prover> Engine<H, P> {
     /// Register the operator/matcher key on the live state, so `step`'s capture
     /// enforces trade authorization. Must match the key the `prover` (and the
     /// contract's verifier) is configured with, or capture and re-verification
-    /// disagree. (v0 admin path.)
+    /// disagree.
     pub fn set_operator_key(&mut self, key: crate::auth::Ed25519PubKey) {
         self.state.set_operator_key(key);
     }
@@ -95,7 +95,7 @@ impl<H: Hasher, P: Prover> Engine<H, P> {
     /// Clear one batch: apply it (capturing the witness) and prove the
     /// transition. A rejected transaction inside the batch simply contributes
     /// nothing (it left state untouched); a *proof* failure is returned as an
-    /// error — it signals an inconsistent witness, which should never happen for
+    /// error, it signals an inconsistent witness, which should never happen for
     /// an honestly-applied batch.
     pub fn step(&mut self, batch: Vec<Tx>) -> Result<BatchOutcome, ProveError> {
         let witness = Witness::capture(&mut self.state, &mut self.tree, &batch);

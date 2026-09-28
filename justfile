@@ -40,11 +40,11 @@ test *FLAGS:
 
 # Circuits workspace (own toolchain / arkworks)
 test-circuits *FLAGS:
-    cargo test --manifest-path clearing-circuits/Cargo.toml --release {{FLAGS}}
+    cargo test --manifest-path circuits/Cargo.toml --release {{FLAGS}}
 
 # Solana program tests (needs cargo-build-sbf)
 test-solana *FLAGS:
-    cargo test --manifest-path clearing-solana/Cargo.toml {{FLAGS}}
+    cargo test --manifest-path solana/Cargo.toml {{FLAGS}}
 
 # Reports test coverage and writes badges/coverage.svg. Requires cargo-llvm-cov.
 coverage *FLAGS:

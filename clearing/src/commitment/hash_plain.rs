@@ -1,9 +1,7 @@
-//! The v0 default [`Hasher`]: SHA-256 with leaf/node domain separation.
+//! Default [`Hasher`]: SHA-256 with leaf/node domain separation.
 //!
-//! Plain and audited, chosen so the commitment is easy to reason about while
-//! the rest of the layer matures. It is **not** SNARK-friendly — a `poseidon2`
-//! implementation of the same [`Hasher`] trait swaps in later with zero
-//! call-site changes (the whole point of the trait seam).
+//! Leaf preimages are tagged `0x00`, internal nodes `0x01`. Another hasher
+//! (see `poseidon2`) implements the same trait.
 
 use sha2::{Digest, Sha256};
 

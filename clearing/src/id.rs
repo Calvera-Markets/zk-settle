@@ -5,7 +5,7 @@
 //! checked (overflow and underflow are errors, never wraps or panics). This is
 //! the same posture the sequencer takes on its record path — the settlement
 //! state machine must replay to a bit-identical state on every node, which a
-//! later validity proof re-derives (see `../docs/zk-validity-feasibility.md`).
+//! later validity proof re-derives.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -36,7 +36,6 @@ impl Amount {
         self.0 < 0
     }
 
-    /// Checked add; `Err(Overflow)` instead of wrapping or panicking.
     #[inline]
     pub fn checked_add(self, rhs: Amount) -> Result<Amount, SettlementError> {
         self.0
@@ -45,9 +44,6 @@ impl Amount {
             .ok_or(SettlementError::Overflow)
     }
 
-    /// Checked sub; `Err(Overflow)` instead of wrapping or panicking. Does not
-    /// enforce non-negativity — the caller (e.g. a balance debit) decides
-    /// whether a negative result is allowed.
     #[inline]
     pub fn checked_sub(self, rhs: Amount) -> Result<Amount, SettlementError> {
         self.0
@@ -56,7 +52,6 @@ impl Amount {
             .ok_or(SettlementError::Overflow)
     }
 
-    /// Checked multiply, used for `price * size` style products.
     #[inline]
     pub fn checked_mul(self, rhs: Amount) -> Result<Amount, SettlementError> {
         self.0
@@ -73,7 +68,7 @@ impl Amount {
     }
 }
 
-/// A trading account — the unit that holds balances and positions.
+/// A trading account, the unit that holds balances and positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub Uuid);
 

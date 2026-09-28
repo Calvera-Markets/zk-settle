@@ -1,25 +1,14 @@
-//! The state commitment: a sparse Merkle tree over accounts, keyed by
-//! [`AccountId`], producing a [`tyalias@Hash`] root.
+//! Sparse Merkle tree over accounts, keyed by [`AccountId`].
 //!
-//! The root is the cryptographic commitment to the entire account state — what
-//! a validity proof will attest to and what on-chain settlement would store.
-//! v0 uses a plain SHA-256 [`Hasher`] ([`hash_plain::Sha256Hasher`]); a
-//! SNARK-friendly Poseidon2 impl drops in later behind the same trait.
+//! Default hasher is SHA-256 ([`hash_plain::Sha256Hasher`]). A `poseidon2`
+//! feature adds a second [`Hasher`]. Depth is [`DEPTH`] (128 unless
+//! `CLEARING_TREE_DEPTH` is set at compile time). Empty subtrees collapse to a
+//! precomputed default hash.
 //!
-//! ## Why a sparse Merkle tree
-//!
-//! Keying by the account UUID gives a fixed-depth tree ([`DEPTH`]; 128 unless
-//! `CLEARING_TREE_DEPTH` is set at compile time) where every empty subtree
-//! collapses to a precomputed default hash, so only non-empty nodes are stored.
-//! Two properties matter:
-//!
-//! - **Canonical:** an empty account and an absent account hash identically
-//!   (the [`crate::account::Account`] prunes zero balances, and the state
-//!   machine prunes empty accounts), so the root depends only on real holdings,
-//!   never on history.
-//! - **Incremental:** a changed account re-hashes only the [`DEPTH`] nodes on
-//!   its root-to-leaf path, driven by [`crate::state::StateDelta`]. The
-//!   `from_state` rebuild is the cross-check.
+//! An empty account and an absent account hash the same (zero balances are
+//! pruned), so the root depends on holdings, not history. Updating an account
+//! re-hashes the [`DEPTH`] nodes on its path ([`crate::state::StateDelta`]).
+//! `from_state` rebuilds the tree as a check.
 
 pub mod hash_plain;
 #[cfg(feature = "poseidon2")]
@@ -174,11 +163,10 @@ pub fn encode_order(order: &crate::auth::Order) -> Vec<u8> {
     out
 }
 
-/// The order's stable identity (its key in the fill-accounting map, and later the
-/// orders tree): a fixed **SHA-256** of `encode_order`. Fixed rather than the
-/// generic commitment `Hasher` so [`crate::state::State`] can compute it without
-/// carrying a hasher type; it is only an addressing id, not a structural node
-/// hash. `salt` makes it unique for otherwise-identical orders.
+/// Order identity for the fill-accounting map: SHA-256 of [`encode_order`].
+/// Always SHA-256 (not the tree [`Hasher`]) so [`crate::state::State`] can
+/// compute it without a hasher type. `salt` distinguishes otherwise-identical
+/// orders.
 pub fn order_id(order: &crate::auth::Order) -> Hash {
     hash_plain::Sha256Hasher.hash_leaf(&encode_order(order))
 }

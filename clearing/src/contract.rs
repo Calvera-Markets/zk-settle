@@ -1,33 +1,17 @@
-//! The mock L1 settlement contract (S1 of `../docs/settlement-l1-plan.md`).
+//! In-memory stand-in for the on-chain settlement program.
 //!
-//! [`MockSettlementContract`] is an **in-memory stand-in for the on-chain
-//! contract** that will eventually hold funds and finalize the rollup. It models
-//! the contract's real responsibilities — escrow custody, the canonical state
-//! root, and **proof-gated batch finalization** — so that logic is written and
-//! tested now; only the on-chain *implementation* (EVM, real verifier, calldata)
-//! is deferred. The struct is the executable spec that implementation ports.
+//! [`MockSettlementContract`] holds escrow, the canonical root, and
+//! proof-gated batches so tests can run without Solana.
 //!
-//! ## What S1 covers
-//!
-//! - **Custody.** [`MockSettlementContract::deposit`] and escrow releases move amounts in an
-//!   in-memory `escrow` ledger — deposited funds and withdrawal payouts are just
-//!   entries here, obeying the same rules the real contract will.
-//! - **Commit → verify.** [`MockSettlementContract::commit`] queues a [`BatchProposal`] that
-//!   extends the committed chain; [`MockSettlementContract::verify_next`] runs the [`Prover`]
-//!   verifier against the canonical root and **only advances the root on a valid
-//!   proof**. A bad proof changes nothing.
-//! - **Async withdrawals.** Settling a batch does **not** pay out inline — a real
-//!   (Solana) settle tx can't push N per-recipient payouts. Instead `verify_next`
-//!   commits the batch's withdrawals as one Merkle root; each user later
-//!   [`MockSettlementContract::claim`]s with an inclusion proof, paid once (nullifier-gated). See
-//!   `../docs/parralel.md` for the tx-limit reasoning.
-//! - **Solvency.** [`MockSettlementContract::is_solvent`] checks the north-star invariant: per
-//!   asset, escrow == Σ L2 balances **+ authorized-but-unclaimed withdrawals**
-//!   (the pending term, since payouts lag settlement).
-//!
-//! Deposit/withdrawal *binding* to L2 (crediting on verify, withdrawal messages,
-//! priority txs, the escape hatch) are later stages; this is the foundation they
-//! build on.
+//! - [`MockSettlementContract::deposit`] credits an in-memory escrow pool.
+//! - [`MockSettlementContract::commit`] queues a [`BatchProposal`];
+//!   [`MockSettlementContract::verify_next`] runs the [`Prover`] and advances
+//!   the root only on a valid proof.
+//! - `verify_next` does not pay. It stores a withdrawals Merkle root; each
+//!   user [`MockSettlementContract::claim`]s with an inclusion proof (one
+//!   nullifier per leaf).
+//! - [`MockSettlementContract::is_solvent`] checks
+//!   `escrow == Σ L2 balances + unclaimed withdrawals` per asset.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -139,7 +123,7 @@ pub struct MockSettlementContract<V: Prover> {
     root: Hash,
     /// Committed batches awaiting proof, in order.
     pending: VecDeque<BatchProposal>,
-    /// The proof verifier (the `Prover` seam; the stub today, a SNARK later).
+    /// Proof verifier ([`Prover`]).
     verifier: V,
     /// Monotonic source of deposit nonces. The contract is the sole issuer, so
     /// every deposit it originates is unique; the state machine then credits each
@@ -154,17 +138,12 @@ pub struct MockSettlementContract<V: Prover> {
     /// DA blobs of finalized batches, in order — the public record from which
     /// anyone reconstructs account state to exit via the escape hatch.
     da_blobs: Vec<DaBlob>,
-    /// Per finalized batch, the Merkle root over that batch's withdrawal messages
-    /// (index = batch sequence). A verified batch commits *one* root here — O(1),
-    /// no per-recipient payout at settle time; users then [`claim`](Self::claim)
-    /// asynchronously against it. This is the Solana-real model: settling can't
-    /// push N payouts in one tx (account/size/compute limits), so it commits a
-    /// root and each user pulls their own.
+    /// Per finalized batch, the Merkle root over that batch's withdrawal
+    /// messages (index = batch sequence). Users [`claim`](Self::claim) against
+    /// it; settle does not pay recipients one by one.
     withdrawal_roots: Vec<Hash>,
-    /// Nullifier set: the leaf hash of every *claimed* withdrawal. A claim is
-    /// rejected if its nullifier is present — the "exactly once" guarantee for a
-    /// static (already-committed) withdrawals root. (On Solana this is a
-    /// PDA-per-nullifier; here a set models the same create-once semantics.)
+    /// Leaf hashes of claimed withdrawals. A second claim of the same leaf
+    /// is rejected. On Solana this is a PDA per nullifier.
     claimed: BTreeSet<Hash>,
     /// Authorized-but-unclaimed withdrawals per asset. Escrow still holds these
     /// (they're released only at claim time), so solvency is
@@ -249,8 +228,7 @@ impl<V: Prover> MockSettlementContract<V> {
             amount,
             nonce,
             owner,
-            // The mock contract's deposit path does not register a trading key
-            // yet; key registration through the contract API is Phase 2/4.
+            // Deposit through this API does not register a trading key.
             trading_key: None,
         })
     }
@@ -532,15 +510,11 @@ impl<V: Prover> MockSettlementContract<V> {
 
     // --- invariant -------------------------------------------------------
 
-    /// The north-star solvency invariant: for every asset in `assets`, escrow
-    /// equals the sum of all L2 balances **plus authorized-but-unclaimed
-    /// withdrawals** of that asset. Escaped `(account, asset)` pairs are omitted
-    /// from the L2 sum: escape pays from escrow without mutating the off-chain
-    /// state machine. The pending term matters now that withdrawals are claimed
-    /// asynchronously: a proven withdrawal has already debited the L2 balance,
-    /// but its escrow isn't released until the user claims — so escrow
-    /// temporarily exceeds Σ L2 by exactly the unclaimed amount. (Holds at settled
-    /// points; in-flight unverified batches remain the documented exception.)
+    /// For every asset in `assets`:
+    /// `escrow == Σ L2 balances + unclaimed withdrawals`.
+    /// Escaped `(account, asset)` pairs are omitted from the L2 sum (escape
+    /// pays escrow without mutating the off-chain state). Assert only at
+    /// settled points; a committed-but-unverified batch is the exception.
     pub fn is_solvent(&self, state: &State, assets: &[AssetId]) -> bool {
         assets.iter().all(|&asset| {
             let l2: i128 = state

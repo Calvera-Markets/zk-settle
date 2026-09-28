@@ -1,20 +1,12 @@
-//! The prover / witness seam.
+//! Witness and prover for one batch transition `prev_root → new_root`.
 //!
-//! A [`Witness`] captures everything needed to verify a state transition
-//! `prev_root → new_root` over a batch of transactions **by Merkle paths alone**
-//! — the per-leaf updates the batch produced, each with the sibling path valid
-//! at the moment it was written (see [`crate::commitment::LeafUpdate`]). A
-//! [`Prover`] turns that into a [`Proof`].
+//! A [`Witness`] holds the Merkle updates ([`crate::commitment::LeafUpdate`]),
+//! the prior accounts, the txs, and the withdrawal messages. [`Prover::prove`]
+//! checks that witness.
 //!
-//! v0 ships [`ReplayProver`], a **stub**: it re-derives `prev_root` and
-//! `new_root` from the witnessed paths and accepts iff they chain correctly. It
-//! deliberately does **not** prove the *execution* half — that each `new_leaf`
-//! is the correct result of applying the transactions to the prior account
-//! (that is deterministic and replayable, per
-//! `../docs/zk-validity-feasibility.md` §6). A real backend implements the same
-//! [`Prover`] trait, consuming the same [`Witness`], and additionally enforces
-//! execution in-circuit. The seam — `Prover` + `Witness` + per-leaf paths — does
-//! not change when that backend lands.
+//! [`ReplayProver`] only checks that the leaf paths chain `prev_root` to
+//! `new_root`. [`ExecutingProver`] also re-runs the batch (the same body the
+//! SP1 guest runs) so a Merkle-valid but execution-invalid witness is rejected.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,10 +23,9 @@ use crate::instrument::Instrument;
 use crate::state::State;
 use crate::tx::{OnChainMessage, Tx};
 
-/// A self-contained statement of one batch transition — everything a verifier
-/// (the [`ReplayProver`] Merkle check, the [`ExecutingProver`] re-execution, and
-/// eventually a zkVM guest) needs to confirm `prev_root → new_root` is the
-/// correct result of executing `txs`.
+/// One batch transition: Merkle updates, prior accounts, txs, and emitted
+/// withdrawal messages. Enough for [`ReplayProver`] and [`ExecutingProver`]
+/// to check `prev_root → new_root`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Witness {
     pub prev_root: Hash,
@@ -159,8 +150,8 @@ fn verify_chain<H: Hasher>(hasher: &H, witness: &Witness) -> Result<(), ProveErr
     Ok(())
 }
 
-/// A validity proof for a batch transition. Opaque marker in v0 (the stub's
-/// "proof" is the successful path check); a real backend carries the SNARK.
+/// Marker that [`Prover::prove`] succeeded. The zkVM guest produces a SNARK of
+/// the same check; this type does not carry proof bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
     _private: (),
@@ -198,9 +189,8 @@ pub trait Prover {
     fn prove(&self, witness: &Witness) -> Result<Proof, ProveError>;
 }
 
-/// The v0 stub prover: verifies the transition by re-deriving each intermediate
-/// root from the witnessed leaf paths (it "replays" the leaf writes through
-/// their Merkle paths). No SNARK, no execution check — see the module docs.
+/// Merkle-only prover: re-derives each intermediate root from the witnessed
+/// leaf paths. Does not re-execute txs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReplayProver<H: Hasher> {
     hasher: H,
@@ -219,34 +209,17 @@ impl<H: Hasher> Prover for ReplayProver<H> {
     }
 }
 
-/// The executing verifier — the **real correctness** of the keystone, in pure
-/// Rust (and the exact body a zkVM guest runs).
+/// Re-executes the batch on top of the Merkle chain check. This is the body
+/// the SP1 guest runs.
 ///
-/// On top of the Merkle chain check, it **re-executes the batch** from the
-/// witnessed prior account contents and confirms the result *is* the committed
-/// transition:
+/// 1. Claimed `prev_accounts` hash to the `prev_leaf`s in `prev_root`.
+/// 2. Re-running `txs` via [`State::for_replay`] yields leaves equal to the
+///    committed `new_leaf`s.
+/// 3. Re-execution emits exactly `witness.messages`.
 ///
-/// 1. the claimed `prev_accounts` hash to the `prev_leaf`s committed in
-///    `prev_root` (the witness does not lie about the starting state);
-/// 2. re-running `txs` over those accounts (via [`State::for_replay`]) yields
-///    contents whose leaves equal the committed `new_leaf`s — binding execution
-///    to the new root;
-/// 3. re-execution emits exactly the claimed `messages` — binding the withdrawal
-///    payouts to a real debit.
-///
-/// Together these close the gap [`ReplayProver`] leaves open: a Merkle-valid but
-/// execution-invalid batch (wrong fills, or an unbacked withdrawal message) is
-/// rejected. A real SNARK wraps this same logic so the contract can trust it
-/// without re-executing.
-///
-/// **Trade authorization** rides along for free: because it re-executes each
-/// trade via `State::apply`, it re-verifies the maker/taker/matcher signatures
-/// and the over-fill accounting. The `operator_key` and `batch_height` it checks
-/// against are **verifier configuration** carried here — not witness data — so a
-/// witness cannot disable auth by lying about them (the operator key is the
-/// exchange's own; the batch height is the contract's counter). Prior order fills
-/// need no special handling: they live in the account leaves, already bound to
-/// `prev_root` and re-verified by (1)–(2).
+/// A Merkle-valid witness with wrong fills or an unbacked withdrawal fails
+/// here. Trade auth is checked because replay calls `State::apply`.
+/// `operator_key` and `batch_height` are verifier config, not witness fields.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExecutingProver<H: Hasher> {
     hasher: H,

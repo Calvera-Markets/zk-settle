@@ -1,15 +1,9 @@
-//! Trade-authorization primitives: user **trading keys**, **signed orders**, and
-//! the canonical [`Order`] the matcher pairs into a fill.
+//! Trading keys, signed orders, and fill authorization.
 //!
-//! These are the data types and their encodings. Signature *verification* (the
-//! ed25519 backend, and the SP1 precompile that accelerates it in the guest)
-//! lands in a later phase — see `../docs/zkvm-trade-authentication-plan.md`. Here
-//! we only fix the shapes and the byte layout that gets signed / committed, so
-//! everything downstream (commitment leaf, order hash) is stable.
-//!
-//! Threat model recap: matching stays trusted (the backend decides *which* orders
-//! pair). The proof enforces only that both users **and** the matcher authorized a
-//! fill that respects each order's signed terms, and that no order is over-filled.
+//! Matching chooses which orders pair. [`ExecutingProver`](crate::prover::ExecutingProver)
+//! checks that both users and the matcher signed a fill that respects each
+//! order's terms and is not over-filled. [`verify`] is the ed25519 check (the
+//! SP1 guest uses the same function, accelerated by a precompile).
 
 use serde::{Deserialize, Serialize};
 
@@ -56,10 +50,9 @@ pub enum Side {
 
 /// A user's signed authorization to trade, up to `base_amount` at `limit_price`.
 ///
-/// The matcher may fill it partially and repeatedly (across async batches) as long
-/// as cumulative fills stay within `base_amount` — tracked per `order_hash` in the
-/// committed orders tree (a later phase). `salt` makes the hash unique so two
-/// orders with identical terms are distinct.
+/// The matcher may fill it partially and repeatedly as long as cumulative
+/// fills stay within `base_amount` (tracked per order id in the account leaf).
+/// `salt` makes the hash unique so two orders with identical terms are distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Order {
     pub account: AccountId,
@@ -83,9 +76,8 @@ pub struct SignedOrder {
     pub sig: Ed25519Signature,
 }
 
-/// The full authorization attached to a matched trade: both parties' signed
-/// orders plus the **matcher's** signature over the fill. The proof requires all
-/// three (see `../docs/zkvm-trade-authentication-plan.md`).
+/// Authorization on a matched trade: both parties' signed orders plus the
+/// matcher's signature over the fill. All three are required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeAuth {
     pub buy: SignedOrder,
@@ -98,8 +90,7 @@ pub struct TradeAuth {
 /// small-order / malleable points). Returns `false` on any malformed key or
 /// signature rather than erroring — the caller turns that into a rejection.
 ///
-/// This is the one function the SP1 guest accelerates via the ed25519 precompile
-/// (Phase 4); nothing else about the call sites changes.
+/// The SP1 guest calls this too; ed25519 is a precompile there.
 pub fn verify(pubkey: &Ed25519PubKey, msg: &[u8], sig: &Ed25519Signature) -> bool {
     use ed25519_dalek::{Signature, VerifyingKey};
     let Ok(vk) = VerifyingKey::from_bytes(&pubkey.0) else {

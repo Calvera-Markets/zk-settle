@@ -1,13 +1,8 @@
-//! The settlement seam: the [`Settlement`] trait every instrument type
-//! implements, the [`Ledger`] it acts through, and the fixed dispatch site
-//! ([`handler`]).
+//! Per-instrument settlement: [`Settlement`], [`Ledger`], and [`handler`].
 //!
-//! This module is the open/closed boundary of the Option A design
-//! (`../docs/unified-instrument-model.md` §7). The trait, the [`Ledger`]
-//! interface, and the [`handler`] dispatch are **closed** — adding an
-//! instrument type never edits them. A new type is a new [`Settlement`] impl
-//! (in a sibling module) plus a [`crate::instrument::SettlementKind`] arm in
-//! [`handler`].
+//! Matching produces a [`Fill`]. Settlement only moves the resulting
+//! quantities. A new product is a [`Settlement`] impl plus a
+//! [`crate::instrument::SettlementKind`] arm in [`handler`].
 
 pub mod spot_swap;
 
@@ -32,12 +27,9 @@ pub struct Fill {
     pub quote_amount: Amount,
 }
 
-/// A mutable, multi-account view settlement acts through. Decoupling settlement
-/// from the concrete state container (a) avoids double-mutable-borrow gymnastics
-/// when a fill touches two accounts, and (b) keeps the door open for settlement
-/// that touches many accounts at once (funding, liquidation) without changing
-/// the [`Settlement`] signatures. The [`crate::state::State`] machine implements
-/// this in Phase 2.
+/// Mutable multi-account view settlement writes through. Two-sided fills
+/// (and later funding/liquidation) go through this instead of borrowing
+/// [`crate::state::State`] accounts directly.
 pub trait Ledger {
     /// Credit `amount` (positive) of `asset` to `account`.
     fn credit(
@@ -57,15 +49,12 @@ pub trait Ledger {
     ) -> Result<(), SettlementError>;
 }
 
-/// The per-instrument settlement rule. Dispatched by [`handler`] on the
-/// instrument's [`SettlementKind`]; the matching layer never sees it.
+/// Per-instrument settlement rule. [`handler`] dispatches on
+/// [`SettlementKind`]; matching never sees this.
 ///
-/// v0 declares the two methods spot needs and a margin engine will need:
-/// `apply_fill` (mutate balances/positions for a trade) and `position_value`
-/// (a position's contribution to account value). Scheduled market-global events
-/// (funding ticks, expiry) are modeled separately as state-level transactions
-/// that mutate [`MarketGlobals`], with per-position lazy reconciliation — so no
-/// broad-sweep trait method is needed here.
+/// `apply_fill` moves balances/positions for a trade. `position_value` is a
+/// position's contribution to account value (zero for spot). Funding ticks and
+/// expiry are state-level txs on [`MarketGlobals`], not methods here.
 pub trait Settlement {
     /// Apply a matched `fill` to the ledger under the given instrument/globals.
     fn apply_fill(
@@ -76,9 +65,8 @@ pub trait Settlement {
         fill: &Fill,
     ) -> Result<(), SettlementError>;
 
-    /// A position's contribution to account value, for the (later) margin
-    /// check. Spot has no positions, so this is zero; derivatives mark to
-    /// market here.
+    /// Position contribution to account value. Spot has no positions (zero);
+    /// derivatives mark to market here.
     fn position_value(
         &self,
         instrument: &Instrument,
@@ -87,9 +75,8 @@ pub trait Settlement {
     ) -> Amount;
 }
 
-/// The fixed dispatch site: map a [`SettlementKind`] to its handler. Adding an
-/// instrument type adds exactly one arm here and one impl module — the linear
-/// extension point (`../docs/unified-instrument-model.md` §7.2).
+/// Map a [`SettlementKind`] to its handler. A new instrument type adds one
+/// arm and one impl module.
 pub fn handler(kind: SettlementKind) -> &'static dyn Settlement {
     static SPOT_SWAP: spot_swap::SpotSwap = spot_swap::SpotSwap;
     match kind {

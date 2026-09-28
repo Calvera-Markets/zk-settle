@@ -1,23 +1,12 @@
-//! A Poseidon2 [`Hasher`] — the second hash implementation, behind the
-//! `poseidon2` feature.
+//! Poseidon2 [`Hasher`], behind the `poseidon2` feature. Opt-in; SHA-256 stays
+//! the default.
 //!
-//! This exists to demonstrate that the hash layer is a **linear seam**: the
-//! whole stack is generic over `H: Hasher`, so swapping the hash is a new impl
-//! and a type parameter — nothing structural changes. `Sha256Hasher` stays the
-//! default; `Poseidon2Hasher` is opt-in (e.g. to compare zkVM proving cost).
-//!
-//! ## Honesty notes
-//!
-//! - This is a **self-contained, structurally-faithful Poseidon2** over the
-//!   BabyBear field (width 16, x^7 S-box, 8 external + 13 internal rounds, the
-//!   efficient M4-block external layer and sum+diagonal internal layer). The
-//!   **round constants and internal diagonal are generated deterministically
-//!   here, not taken from an audited reference** — so it is correct as a
-//!   permutation-shaped, deterministic hash and gives a representative *cost*
-//!   profile, but it is **not** a spec-compliant, audited Poseidon2. A
-//!   production version uses the published constants (and ideally a precompile).
-//! - SP1 exposes no user-facing Poseidon2 precompile (unlike sha2), so in the
-//!   zkVM this runs as *software* — the point of the comparison.
+//! Structurally a Poseidon2 over BabyBear (width 16, x^7 S-box, 8 external +
+//! 13 internal rounds, M4-block external mix). Round constants and the
+//! internal diagonal are generated here, not taken from an audited spec, so
+//! this is a deterministic permutation-shaped hash for cost comparison, not a
+//! production Poseidon2. SP1 has no Poseidon2 precompile, so in the guest this
+//! runs in software.
 
 use super::{Hash, Hasher};
 

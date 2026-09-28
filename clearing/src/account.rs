@@ -1,10 +1,7 @@
-//! The unified account model: `balances` + `positions`.
+//! Trading account: `balances` plus `positions`.
 //!
-//! This is the closed core of the Option A design
-//! (`../docs/unified-instrument-model.md` §7.1): every instrument type reuses
-//! these two primitives and never adds a third account field. Spot lives
-//! entirely in `balances`; derivatives add `positions` entries. Adding an
-//! instrument type does not touch this file.
+//! Spot uses balances only. Derivatives add position entries. A new instrument
+//! type should not add a third map on [`Account`].
 
 use std::collections::BTreeMap;
 
@@ -13,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::SettlementError;
 use crate::id::{Amount, AssetId, InstrumentId, L1Address};
 
-/// A derivative position. Present in the type system from day one so the model
-/// is ready for perps/futures, but unused by the spot-swap beachhead (spot
-/// holdings are `balances`, not positions).
+/// A derivative position. Unused by spot (spot holdings are `balances`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Position {
     pub instrument: InstrumentId,
@@ -36,18 +31,13 @@ pub struct Position {
 pub struct Account {
     balances: BTreeMap<AssetId, Amount>,
     positions: BTreeMap<InstrumentId, Position>,
-    /// The account's registered ed25519 trading key: the key whose signatures
-    /// authorize this account's orders. `None` until registered (folded into the
-    /// first deposit). Committed in the leaf, so the validity proof binds order
-    /// signatures to the key the state records. See `../docs/`
-    /// `zkvm-trade-authentication-plan.md`.
+    /// Registered ed25519 trading key. `None` until the first deposit.
+    /// Committed in the leaf so order signatures bind to the key on the account.
     trading_key: Option<crate::auth::Ed25519PubKey>,
-    /// Cumulative base filled per order id, for this account's orders. Kept **in
-    /// the account leaf** so the existing commitment + executing-prover
-    /// re-execution bind and re-verify the partial-fill / anti-replay accounting
-    /// — no separate orders tree. Entries are always positive (a fill only adds);
-    /// they persist even after the balance drains, so a filled order can never be
-    /// re-filled. (Growth: fully-filled orders are never pruned in v1.)
+    /// Cumulative base filled per order id. Lives in the account leaf so
+    /// re-execution checks partial fills. Entries only increase; they stay after
+    /// the balance drains so a filled order cannot be filled again. Fully-filled
+    /// orders are not pruned.
     order_fills: BTreeMap<crate::commitment::Hash, Amount>,
     /// L1 owner (Solana pubkey) bound at first deposit. Ignored by [`Self::is_empty`]:
     /// an owner-only account is pruned and rebound on the next first deposit.

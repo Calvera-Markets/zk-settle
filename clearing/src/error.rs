@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::id::{AccountId, AssetId, MarketId};
 
 /// Errors returned when applying settlement. These are *rejections* of a
-/// transaction, not faults — the state machine stays consistent and the caller
+/// transaction, not faults. The state machine stays consistent and the caller
 /// learns precisely why a transaction did not apply.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SettlementError {
@@ -32,7 +32,7 @@ pub enum SettlementError {
     DuplicateDeposit(u64),
 
     /// An attempt to register a *different* trading key on an account that
-    /// already has one (no rotation in v1).
+    /// already has one.
     #[error("account already has a different trading key registered")]
     KeyAlreadyRegistered,
 

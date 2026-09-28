@@ -1,16 +1,13 @@
-//! The deterministic clearing state machine.
+//! Deterministic clearing state machine.
 //!
-//! [`State`] holds the account set, the per-market instruments, and their
-//! [`MarketGlobals`]. [`State::apply`] applies one [`Tx`] **transactionally** —
-//! it dispatches to the instrument's settlement rule via
-//! [`crate::settlement::handler`], and a rejected transaction leaves the state
-//! exactly as it was (it snapshots the touched accounts and rolls back on
-//! error). This is the closed core: adding an instrument type never edits this
-//! file.
+//! [`State`] holds accounts, per-market [`Instrument`]s, and [`MarketGlobals`].
+//! [`State::apply`] applies one [`Tx`] transactionally: it dispatches through
+//! [`crate::settlement::handler`], and a rejected tx rolls back the touched
+//! accounts. Adding an instrument type does not require edits here.
 //!
-//! Determinism: ordered (`BTreeMap`) containers throughout, checked arithmetic,
-//! no wall-clock or RNG. The same `Tx` sequence over a fresh `State` always
-//! yields an identical `State` — the property a later validity proof relies on.
+//! Containers are ordered (`BTreeMap`), arithmetic is checked, and there is no
+//! wall-clock or RNG. The same `Tx` sequence on a fresh `State` always yields
+//! the same `State`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,8 +20,8 @@ use crate::instrument::{Instrument, MarketGlobals};
 use crate::settlement::{Fill, Ledger, handler};
 use crate::tx::Tx;
 
-/// Which accounts a successfully-applied [`Tx`] changed. Consumed by the
-/// commitment layer (Phase 3) to update only the touched Merkle leaves.
+/// Which accounts a successfully-applied [`Tx`] changed. The commitment layer
+/// updates only these Merkle leaves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDelta {
     pub changed: Vec<AccountId>,
@@ -37,10 +34,8 @@ pub struct State {
     accounts: BTreeMap<AccountId, Account>,
     instruments: BTreeMap<MarketId, Instrument>,
     globals: BTreeMap<MarketId, MarketGlobals>,
-    /// Deposit nonces already credited — replay protection so a deposit is never
-    /// double-credited. Off the commitment tree in v0 (the root commits accounts
-    /// only); a production system would commit this set too so no-double-process
-    /// is itself provable.
+    /// Deposit nonces already credited. A deposit is never double-credited.
+    /// Not in the account tree (the root commits accounts only).
     applied_deposits: BTreeSet<u64>,
     /// The operator/matcher ed25519 key. Every trade must carry a matcher
     /// signature under this key; while `None`, no authenticated trade can pass.

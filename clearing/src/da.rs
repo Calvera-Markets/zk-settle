@@ -1,16 +1,9 @@
-//! Data availability: the per-batch blob that makes the escape hatch real.
+//! Data availability blobs for the escape hatch.
 //!
-//! For the system to be genuinely non-custodial, a user must be able to
-//! reconstruct their account state and exit **without the operator** — using
-//! only data posted publicly (on-chain). That data is the [`DaBlob`]: for each
-//! account a batch changed, its new contents. Apply the blobs in order
-//! ([`reconstruct`]) and you have the full account set behind the committed
-//! root, from which anyone can build the Merkle proof an escape withdrawal needs.
-//!
-//! v0 carries full account contents per changed account; a production system
-//! compresses to minimal deltas (Lighter's "Account Delta Tree") and posts them
-//! as Ethereum blobs. The shape — "changed accounts per batch, replayed to
-//! reconstruct" — is the same.
+//! Each batch posts a [`DaBlob`]: the new contents of every account it changed
+//! (`None` means the account was pruned). [`reconstruct`] replays blobs in
+//! order (last write wins) so a user can rebuild the account set from public
+//! data and prove an escape withdrawal against the committed root.
 
 use std::collections::BTreeMap;
 

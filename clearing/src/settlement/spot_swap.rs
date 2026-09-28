@@ -1,9 +1,6 @@
 //! Spot settlement: a fill is an atomic swap of base and quote balances.
 //!
-//! The beachhead instrument. No funding, no oracle, no margin, no positions —
-//! the simplest possible settlement rule, which is exactly why it validates the
-//! account model, the dispatch seam, and (later) the commitment without any
-//! derivative machinery.
+//! No funding, oracle, margin, or positions.
 
 use crate::account::Position;
 use crate::error::SettlementError;
@@ -64,8 +61,7 @@ mod tests {
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
-    /// A minimal in-test [`Ledger`] so Phase 1 can exercise settlement without
-    /// the Phase 2 state machine.
+    /// In-test [`Ledger`] over a map of accounts.
     #[derive(Default)]
     struct TestLedger {
         accounts: BTreeMap<AccountId, Account>,
@@ -207,11 +203,9 @@ mod tests {
             }
         );
 
-        // seller's base was debited first, then buyer's quote debit failed —
-        // confirm no partial credit happened (buyer got no BTC, seller no USDC).
-        // The seller's BTC debit *did* occur before the abort; the state machine
-        // (Phase 2) applies fills transactionally so a rejected tx rolls back.
-        // Here we assert the no-credit guarantee the rule itself provides:
+        // Seller base was debited first, then buyer quote debit failed.
+        // This ledger does not roll back the first debit; `State::apply` does.
+        // The rule itself must not credit after a failed debit:
         assert_eq!(l.bal(buyer(), BTC), Amount::ZERO);
         assert_eq!(l.bal(seller(), USDC), Amount::ZERO);
     }

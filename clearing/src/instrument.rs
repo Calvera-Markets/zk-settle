@@ -1,25 +1,22 @@
-//! The instrument descriptor and the [`SettlementKind`] discriminator.
+//! Instrument type and settlement dispatch.
 //!
-//! This is the **open** half of the Option A seam
-//! (`../docs/unified-instrument-model.md` §7.2): adding an instrument type is a
-//! new [`SettlementKind`] variant plus a [`crate::settlement::Settlement`] impl
-//! plus (optionally) new [`MarketGlobals`] fields — and nothing in the closed
-//! core changes.
+//! Matching sees `{market, side, price, qty}`. What a fill does to balances
+//! is chosen here via [`SettlementKind`]. A new product is a new variant plus
+//! a [`crate::settlement::Settlement`] impl; account state and the commitment
+//! stay unchanged.
 
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AssetId, InstrumentId};
 
-/// Selects the settlement rule for an instrument. The settlement engine
-/// dispatches on this; the matching layer never sees it.
+/// Settlement rule for an instrument. The engine dispatches on this; matching
+/// never sees it.
 ///
-/// v0 ships exactly one variant. New product families (perpetual, dated
-/// future, option) are added here as additional variants — the dispatch *site*
-/// is fixed, only the arms grow.
+/// v0 has [`SettlementKind::SpotSwap`] only. Perps, dated futures, and options
+/// are extra variants on the same enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettlementKind {
-    /// Spot: a fill is an atomic swap of base and quote balances. No funding,
-    /// no oracle, no margin.
+    /// Atomic swap of base and quote balances. No funding, oracle, or margin.
     SpotSwap,
 }
 
@@ -29,22 +26,20 @@ pub enum SettlementKind {
 pub struct Instrument {
     pub id: InstrumentId,
     pub kind: SettlementKind,
-    /// The asset being traded (e.g. BTC).
+    /// Asset being traded (e.g. BTC).
     pub base: AssetId,
-    /// The asset it is priced/settled in (e.g. USDC).
+    /// Asset it is priced and settled in (e.g. USDC).
     pub quote: AssetId,
-    /// Decimal scale (base-units exponent) of base/quote. Carried for
-    /// completeness and future rounding logic; spot v0 settles in raw base
-    /// units and does not rescale.
+    /// Decimal scale of base/quote. Spot v0 settles in raw units and does not
+    /// rescale; the fields are here for later rounding.
     pub base_scale: u8,
     pub quote_scale: u8,
 }
 
-/// Per-market, time-varying global state read by settlement. Empty for spot;
-/// funding indices, mark/index prices, expiry, and open interest live here for
-/// derivatives — hoisted out of the account leaf so a spot path never touches
-/// funding logic (`../docs/unified-instrument-model.md` §5).
+/// Per-market, time-varying state settlement can read. Empty for spot.
+/// Funding, mark/index, expiry, and open interest go here for derivatives so
+/// a spot path never touches them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketGlobals {
-    // intentionally empty in v0
+    // empty in v0
 }

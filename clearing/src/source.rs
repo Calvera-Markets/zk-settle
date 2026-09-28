@@ -1,26 +1,21 @@
-//! The transaction-source seam and a synthetic source.
+//! Where [`crate::engine::Engine`] gets batches of [`crate::tx::Tx`].
 //!
-//! [`TxSource`] is what the replay loop ([`crate::engine::Engine`]) pulls
-//! batches from. v0 ships [`SyntheticSource`] (scripted batches for tests and
-//! demos). The real implementation is the **off-path tailer**
-//! (`../docs/zk-validity-feasibility.md` §5): it reads the sequencer's committed
-//! log, decodes each `Envelope::Order` into a [`crate::tx::Tx`] (a deposit /
-//! withdraw, or a book-produced fill → `Trade`), groups them into batches, and
-//! yields them here — with no change to the engine or the state machine.
+//! [`SyntheticSource`] is an in-memory queue of scripted batches (tests and
+//! demos). A live adapter would pull deposits, withdraws, and fills from the
+//! sequencer log and implement the same [`TxSource`] trait.
 
 use std::collections::VecDeque;
 
 use crate::tx::Tx;
 
-/// A source of transaction batches. A batch is the unit the engine clears and
-/// proves together (the analogue of a Lighter "block"/"segment").
+/// A source of transaction batches. The engine clears and proves one batch
+/// at a time.
 pub trait TxSource {
     /// The next batch, or `None` when the source is exhausted.
     fn next_batch(&mut self) -> Option<Vec<Tx>>;
 }
 
-/// A scripted, in-memory source: yields pre-built batches in order. The stand-in
-/// for the committed-log tailer until that adapter exists.
+/// Scripted in-memory source: yields pre-built batches in order.
 #[derive(Debug, Clone, Default)]
 pub struct SyntheticSource {
     batches: VecDeque<Vec<Tx>>,

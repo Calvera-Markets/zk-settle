@@ -3,11 +3,9 @@
 [![CI](https://github.com/Calvera-Markets/zk-settlement/actions/workflows/ci.yml/badge.svg)](https://github.com/Calvera-Markets/zk-settlement/actions/workflows/ci.yml)
 ![coverage](badges/coverage.svg)
 
-Off-chain clearing for a validity exchange, plus a Solana program that holds the funds. Matching and the order book are not in this repo.
+Scallable Solana on-chain settlement layer for off-chain order matching, based on zero-knowledge proofs. Currently this settlement engine only covers spot trading, with plans for supporting marginated trading.
 
-The engine keeps balances, runs spot settlement, and commits a Merkle root. The program holds Token-2022 vaults against that root. Users deposit on-chain. The matcher posts a Groth16 proof of a batch. Users claim withdrawals from a per-batch tree. If the matcher stalls, a freeze plus an inclusion proof against the last committed root lets a user escape.
-
-v0 settlement is spot only.
+The settlement engine stays off-chain and keeps balances, runs spot settlement, and commits a Merkle root. The solana program holds Token-2022 vaults against that root. Users deposit on-chain. The matcher posts a Groth16 proof of a batch. Users claim withdrawals from a per-batch tree. If the matcher stalls, a freeze plus an inclusion proof against the last committed root lets a user escape.
 
 ## Layout
 
@@ -15,15 +13,15 @@ Four Cargo workspaces. The root workspace builds only the native spec:
 
 ```
 members = ["clearing"]
-exclude = ["clearing-zkvm", "clearing-circuits", "clearing-solana"]
+exclude = ["zkvm", "circuits", "solana"]
 ```
 
 | Path | Role |
 | --- | --- |
 | `clearing/` | Account state, spot settlement, SHA-256 sparse Merkle tree, `ExecutingProver`, mock L1 |
-| `clearing-zkvm/` | SP1 guest: same `ExecutingProver`, 144-byte public values |
-| `clearing-circuits/` | Laptop Groth16/BN254 (Poseidon tree, BabyJubJub auth) |
-| `clearing-solana/` | Pinocchio program: custody, settle, claim, freeze/escape |
+| `zkvm/` | SP1 guest: same `ExecutingProver`, 144-byte public values |
+| `circuits/` | Laptop Groth16/BN254 (Poseidon tree, BabyJubJub auth) |
+| `solana/` | Pinocchio program: custody, settle, claim, freeze/escape |
 
 `cargo build --workspace` at the repo root therefore only builds `clearing`.
 
@@ -47,30 +45,30 @@ cargo test -p clearing
 cargo run -p clearing --example spot_demo
 ```
 
-## SP1 guest (`clearing-zkvm`)
+## SP1 guest (`zkvm`)
 
 The guest is that same prover, compiled for SP1. Invalid witnesses panic; no proof can be produced. SHA-256 and ed25519 use SP1 precompiles.
 
-From `clearing-zkvm/` (tree depth 8):
+From `zkvm/` (tree depth 8):
 
 ```sh
 cargo run -p clearing-script --release --locked                 # execute, no proof
 SP1_ALLOW_PROVE=1 ./target/release/clearing-host --prove       # CORE
 ```
 
-`--groth16` wraps the whole SP1 recursion circuit (about 20 minutes and tens of GB). That is not a unit test. Dump with `SP1_ALLOW_GROTH16=1` and `--dump-dir`. A recorded wrap is in `clearing-solana/fixtures/sp1/` (`kat_sp1`).
+`--groth16` wraps the whole SP1 recursion circuit (about 20 minutes and tens of GB). That is not a unit test. Dump with `SP1_ALLOW_GROTH16=1` and `--dump-dir`. A recorded wrap is in `solana/fixtures/sp1/` (`kat_sp1`).
 
-## Circuits (`clearing-circuits`)
+## Circuits (`circuits`)
 
 Hand-written Groth16 over BN254, the curve Solana verifies with `alt_bn128`. The tree is Poseidon-over-BN254 and auth is BabyJubJub EdDSA. Settlement rules match `clearing`; leaf encoding does not. The suite is tens of seconds on a laptop.
 
 ```sh
-cd clearing-circuits
+cd circuits
 cargo test --release
 cargo run --release --example e2e
 ```
 
-## Solana program (`clearing-solana`)
+## Solana program (`solana`)
 
 Pinocchio 0.10. Program id: `AyALYha1o9u43sYybKhfgja7ZtSVXkqUzzVijgkYCm1`.
 
@@ -104,7 +102,7 @@ Version 2 uses a separate `open_vk_account` for claim and escape (`rotate_open_v
 The test SBF build uses `--features mock-proof` (`proof_version = 0` skips pairing). Production deploys must not enable that. Wrap settle is `kat_sp1`. Circuits settle then claim through the vault is `circuits_e2e_settle_then_claim`.
 
 ```sh
-cargo test --manifest-path clearing-solana/Cargo.toml
+cargo test --manifest-path solana/Cargo.toml
 ```
 
 Do not `cargo test -p clearing-solana-program` from the repo root; that package is not in the host workspace.
