@@ -4,8 +4,28 @@
 //! `root_from_path`, `default_hashes`). Empty-subtree defaults are folded
 //! incrementally so the 129-hash table never sits on the SBF stack.
 
-/// Tree depth = bits in an `AccountId` (UUID is 128-bit).
-pub const DEPTH: u8 = 128;
+/// Depth of the SHA-256 sparse account tree.
+///
+/// Set at compile time by `CLEARING_TREE_DEPTH` (default 128).
+pub const DEPTH: u8 = parse_u8(env!("CLEARING_TREE_DEPTH"));
+
+const fn parse_u8(s: &str) -> u8 {
+    let b = s.as_bytes();
+    assert!(!b.is_empty(), "CLEARING_TREE_DEPTH must not be empty");
+    let mut n = 0u8;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(
+            b[i] >= b'0' && b[i] <= b'9',
+            "CLEARING_TREE_DEPTH must be decimal"
+        );
+        n = n * 10 + (b[i] - b'0');
+        i += 1;
+    }
+    n
+}
+
+const _: () = assert!(DEPTH >= 1 && DEPTH <= 128);
 
 pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
     sha256(&[&[0x00], data])
@@ -143,6 +163,25 @@ pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_u8_decimal() {
+        assert_eq!(parse_u8("8"), 8);
+        assert_eq!(parse_u8("128"), 128);
+        assert_eq!(parse_u8("1"), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_empty() {
+        let _ = parse_u8("");
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_non_decimal() {
+        let _ = parse_u8("8a");
+    }
 
     #[test]
     fn leaf_and_node_domain_tags_differ() {

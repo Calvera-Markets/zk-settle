@@ -7,7 +7,8 @@
 //! tampered witnesses.
 //!
 //! Poseidon round constants/MDS are arkworks Grain-LFSR, not the circomlib/EIP
-//! set. [`DEPTH`] is small (8); a production tree is deeper or uses dense indices.
+//! set. [`DEPTH`] is compile-time `CLEARING_TREE_DEPTH` (default 8); a production
+//! tree is deeper or uses dense indices.
 
 use ark_bn254::Fr;
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
@@ -27,8 +28,27 @@ pub mod reference;
 pub mod solana;
 pub mod tree;
 
-/// Merkle depth (8). Production would be deeper or use dense account indices.
-pub const DEPTH: usize = 8;
+/// Merkle depth. Set at compile time by `CLEARING_TREE_DEPTH` (default 8).
+/// Dense tree is `2^DEPTH` leaves, so the allowed range is 1..=16.
+pub const DEPTH: usize = parse_u8(env!("CLEARING_TREE_DEPTH")) as usize;
+
+const fn parse_u8(s: &str) -> u8 {
+    let b = s.as_bytes();
+    assert!(!b.is_empty(), "CLEARING_TREE_DEPTH must not be empty");
+    let mut n = 0u8;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(
+            b[i] >= b'0' && b[i] <= b'9',
+            "CLEARING_TREE_DEPTH must be decimal"
+        );
+        n = n * 10 + (b[i] - b'0');
+        i += 1;
+    }
+    n
+}
+
+const _: () = assert!(DEPTH >= 1 && DEPTH <= 16);
 
 /// Poseidon parameters for BN254 `Fr`: width **t = 3** (rate 2 + capacity 1),
 /// **x⁵ S-box**, **8 full + 57 partial rounds** — the standard BN254 Poseidon
@@ -1108,6 +1128,25 @@ mod tests {
     use crate::tree::MerkleTree;
 
     #[test]
+    fn parse_u8_decimal() {
+        assert_eq!(parse_u8("8"), 8);
+        assert_eq!(parse_u8("16"), 16);
+        assert_eq!(parse_u8("1"), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_empty() {
+        let _ = parse_u8("");
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u8_rejects_non_decimal() {
+        let _ = parse_u8("8a");
+    }
+
+    #[test]
     fn groth16_merkle_inclusion_proves_and_verifies() {
         let mut rng = StdRng::seed_from_u64(0);
 
@@ -1518,7 +1557,7 @@ mod tests {
     fn report_trade_constraints() {
         use ark_relations::r1cs::ConstraintSystem;
 
-        // One trade transition (Merkle folds at DEPTH=8 + range checks), no sigs.
+        // One trade transition (Merkle folds at DEPTH + range checks), no sigs.
         let (prev, new, bpath, spath) = build_trade(
             Fr::from(0xB0u64),
             Fr::from(0x5Eu64),
