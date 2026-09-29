@@ -1,10 +1,10 @@
 # circuits
 
-Hand-written Groth16 circuits over BN254 (the curve Solana verifies with `alt_bn128`). Own workspace, not in the root `clearing` members.
+Hand-written Groth16 circuits over BN254 (the curve Solana verifies with `alt_bn128`).
 
 Native arkworks, no zkVM. The test suite is tens of seconds on a laptop.
 
-The settlement *rule* matches `clearing::settlement::SpotSwap`. The commitment does not: this crate uses a dense Poseidon-over-BN254 tree and BabyJubJub app-keys; `clearing` uses a sparse SHA-256 tree and ed25519.
+The settlement *rule* matches `clearing::settlement::SpotSwap`. This crate uses a dense Poseidon-over-BN254 tree and BabyJubJub app-keys, whereas `clearing` uses a sparse SHA-256 tree and ed25519.
 
 ```
 cargo test --release
@@ -23,12 +23,12 @@ cargo run --release --example e2e
 - `CommitRootsCircuit` — public `prev_root`, `new_root`, `withdrawals_root` with `prev == new`
 - `AuthedTradeCircuit` — swap plus three in-circuit BabyJubJub signatures (buyer, seller, matcher)
 
-Hash is Poseidon over BN254 `Fr` (arkworks native + gadget, same config). EdDSA is in `eddsa.rs`. Wire encoding is in `solana.rs`.
+Hash is Poseidon over BN254 `Fr` (arkworks native + gadget, same config).
 
 ## Notes
 
 Poseidon round constants and MDS come from arkworks' Grain LFSR, not the circomlib/EIP set. Interop with an on-chain Poseidon needs those standard parameters pinned.
 
-`DEPTH` is 8 here. A production tree is deeper or uses dense indices.
+`DEPTH` is compile-time `CLEARING_TREE_DEPTH` (default 8, max 16 because the tree is dense). A production tree is deeper or uses dense indices.
 
 The EdDSA scheme is a custom Poseidon-challenge construction; it is tested, not audited.
